@@ -1,0 +1,16 @@
+server:
+  port: 8554
+  mount: /live
+capture:
+  device: /dev/video0
+  width: 1280
+  height: 720
+  framerate: 30
+  pixfmt: NV12
+encoder:
+  backend: vaapi          # vaapi | nvenc | v4l2m2m | x264
+  bitrate_kbps: 4000
+  gop: 30
+  bframes: 0
+log:
+  level: info             # trace|debug|info|warn|err
