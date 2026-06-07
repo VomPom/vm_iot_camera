@@ -6,9 +6,9 @@ capture:
   width: 1280
   height: 720
   framerate: 30
-  pixfmt: NV12
+  pixfmt: UYVY
 encoder:
-  backend: vaapi          # vaapi | nvenc | v4l2m2m | x264
+  backend: x264          # vaapi | nvenc | v4l2m2m | x264
   bitrate_kbps: 4000
   gop: 30
   bframes: 0

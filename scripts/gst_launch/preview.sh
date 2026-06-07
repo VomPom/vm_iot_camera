@@ -7,10 +7,16 @@ W="${2:-1280}"
 H="${3:-720}"
 FPS="${4:-30}"
 
-# 优先尝试 YUY2
+# 采集格式来自 _common.sh：根据 BACKEND 推导 SRC_FMT；也可用 FMT=YUY2 直接覆盖
+source "$(dirname "$0")/_common.sh"
+ENC="$(select_backend)"
+FMT="${FMT:-$(select_src_fmt "$ENC")}"
+
+echo "[info] backend=$ENC, src_fmt=$FMT, dev=$DEV, ${W}x${H}@${FPS}"
+
 gst-launch-1.0 -v \
     v4l2src device="$DEV" \
-    ! "video/x-raw,format=YUY2,width=$W,height=$H,framerate=$FPS/1" \
+    ! "video/x-raw,format=$FMT,width=$W,height=$H,framerate=$FPS/1" \
     ! videoconvert \
     ! autovideosink sync=false
 
