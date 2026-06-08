@@ -8,11 +8,13 @@
 #define VM_IOT_RTSP_SERVER_H
 
 #include <gst/rtsp-server/rtsp-server.h>
+#include "pipeline_builder.h"
+
 struct Config;
 
 class RtspServer {
 public:
-    bool start(const Config& cfg);
+    bool start(const Config& cfg, PipelineBuilder::Mode mode);
     void stop();
 
 private:

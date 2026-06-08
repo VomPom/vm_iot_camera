@@ -136,7 +136,7 @@ static void process_frame(const void *data, int frame_idx) {
     if (frame_idx % SAVE_EVERY != 0) return;
     char path[64];
     snprintf(path, sizeof(path), "export/frame_%d.ppm", frame_idx);
-    uyvy422_save_as_ppm(data, path);
+    yuv420_save_as_ppm(data, path);
     printf("saved %s\n", path);
 }
 
@@ -158,12 +158,12 @@ int main(void) {
         .fmt.pix = {
             .width = WIDTH,
             .height = HEIGHT,
-            .pixelformat = V4L2_PIX_FMT_UYVY,
+            .pixelformat = V4L2_PIX_FMT_YUV420,
             .field = V4L2_FIELD_NONE,
         },
     };
     xioctl(fd, VIDIOC_S_FMT, &fmt, "VIDIOC_S_FMT");
-    if (fmt.fmt.pix.pixelformat != V4L2_PIX_FMT_UYVY ||
+    if (fmt.fmt.pix.pixelformat != V4L2_PIX_FMT_YUV420 ||
         fmt.fmt.pix.width != WIDTH ||
         fmt.fmt.pix.height != HEIGHT) {
         fprintf(stderr, "驱动实际生效格式与请求不符: %ux%u fmt=0x%08x\n",

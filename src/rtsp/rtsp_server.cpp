@@ -16,7 +16,7 @@ void RtspServer::on_client_connected(GstRTSPServer*, GstRTSPClient* c, gpointer)
     LOGI("client connected: {}", ip ? ip : "unknown");
 }
 
-bool RtspServer::start(const Config& cfg) {
+bool RtspServer::start(const Config& cfg, PipelineBuilder::Mode mode) {
     server_ = gst_rtsp_server_new();
     if (!server_) {
         LOGE("gst_rtsp_server_new failed");
@@ -29,7 +29,7 @@ bool RtspServer::start(const Config& cfg) {
     mounts_  = gst_rtsp_server_get_mount_points(server_);
     factory_ = gst_rtsp_media_factory_new();
 
-    std::string launch = PipelineBuilder::build(cfg);
+    std::string launch = PipelineBuilder::build(cfg, mode);
     LOGI("rtsp launch: {}", launch);
     gst_rtsp_media_factory_set_launch(factory_, launch.c_str());
 

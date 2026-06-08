@@ -37,8 +37,11 @@ int main(int argc, char** argv) {
     GMainLoop* loop = g_main_loop_new(nullptr, FALSE);
     install_signals(loop);
 
+    auto mode = PipelineBuilder::detect_mode(cfg);
+    LOGI("pipeline mode = {}", mode == PipelineBuilder::Mode::Dmabuf ? "dmabuf" : "mmap");
+
     RtspServer server;
-    if (!server.start(cfg)) {
+    if (!server.start(cfg, mode)) {
         g_main_loop_unref(loop);
         return 2;
     }

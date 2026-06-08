@@ -7,6 +7,7 @@
 
 #include "config.h"
 
+#include <fstream>
 #include <yaml-cpp/yaml.h>
 #include <getopt.h>
 #include <string>
@@ -36,6 +37,14 @@ Config Config::from_file(const std::string& path) {
     if (auto l = n["log"]) {
         c.log.level = l["level"].as<std::string>(c.log.level);
     }
+    // todo:: read pipeline config.
+    if (auto p = n["pipeline"]) {
+        c.pipeline.v4l2_nbuffers     = p["v4l2_nbuffers"    ].as<int>(c.pipeline.v4l2_nbuffers);
+        c.pipeline.encoder_buffers   = p["encoder_buffers"  ].as<int>(c.pipeline.encoder_buffers);
+        c.pipeline.queue_max_buffers = p["queue_max_buffers"].as<int>(c.pipeline.queue_max_buffers);
+        c.pipeline.queue_leaky       = p["queue_leaky"      ].as<std::string>(c.pipeline.queue_leaky);
+    }
+
     return c;
 }
 

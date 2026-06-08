@@ -37,11 +37,29 @@ struct LogConfig {
     std::string level = "info";
 };
 
+struct PipelineConfig {
+    int v4l2_nbuffers = 4;
+    int encoder_buffers = 4;
+    int queue_max_buffers = 2;
+    std::string queue_leaky = "downstream"; // upstream | downstream | no
+};
+
+struct FilterConfig {
+    bool   enable_f1     = true;     // 双边磨皮
+    bool   enable_f3     = false;     // 锐化
+    float  sigma_space   = 4.0f;
+    float  sigma_color   = 0.10f;
+    float  unsharp_amount= 0.5f;
+    std::string shader_dir = "/home/ubuntu/Desktop/JW/vm_iot/shaders";
+};
+
 struct Config {
     ServerConfig server;
     CaptureConfig capture;
     EncoderConfig encoder;
     LogConfig log;
+    PipelineConfig pipeline;
+    FilterConfig filter;
 
     /* 从 yaml 文件读，失败抛 std::runtime_error */
     static Config from_file(const std::string &path);
