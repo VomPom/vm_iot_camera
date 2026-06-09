@@ -12,7 +12,6 @@
 #include <cstdint>
 
 
-#pragma once
 struct ServerConfig {
     uint16_t port = 8554;
     std::string mount = "/live";
@@ -37,16 +36,12 @@ struct LogConfig {
     std::string level = "info";
 };
 
-struct PipelineConfig {
-    int v4l2_nbuffers = 4;
-    int encoder_buffers = 4;
-    int queue_max_buffers = 2;
-    std::string queue_leaky = "downstream"; // upstream | downstream | no
-};
-
 struct FilterConfig {
     bool        enabled    = true;
-    std::string shader     = "mosaic.frag";
+    std::string shader     = "effects.frag";         // 单一 shader 文件；运行时通过 uniform filter_type 切换分支
+    int         filter_type = 0;                     // 启动默认特效：0=passthrough 1=mosaic 2=invert ...
+    int         max_type    = 2;                     // filter next/prev 循环上限（含），与 shader 内 if 分支保持一致
+    std::string control_fifo;                        // FIFO 控制通道路径，空串=不开启
 };
 
 struct Config {
@@ -54,7 +49,6 @@ struct Config {
     CaptureConfig capture;
     EncoderConfig encoder;
     LogConfig log;
-    PipelineConfig pipeline;
     FilterConfig filter;
 
     std::string config_dir;

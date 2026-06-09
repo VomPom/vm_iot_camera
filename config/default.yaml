@@ -12,13 +12,11 @@ encoder:
   bitrate_kbps: 4000
   gop: 30
   bframes: 0
-pipeline:
-  v4l2_nbuffers: 4         # 太少易掉帧, 太多增加延迟; 4-6 为佳
-  encoder_buffers: 4       # 编码器输出端
-  queue_max_buffers: 2     # GStreamer queue
-  queue_leaky: downstream  # 满时丢老帧
 filter:
   enabled: true                       # 总开关：false 时 pipeline 不插入 GL 滤镜段
-  shader: mosaic.frag                 # fragment 文件。绝对路径直接使用；
+  shader: effects.frag                # 单一着色器文件；相对路径以 config/../shaders 为基目录
+  filter_type: 0                      # 启动默认特效：0=passthrough 1=mosaic 2=invert
+  max_type: 2                         # filter next 循环上限（含），与 shader 内 if 分支保持一致
+  control_fifo: /tmp/vm_iot.ctl       # 运行时控制 FIFO；空串=不开启
 log:
   level: info             # trace|debug|info|warn|err

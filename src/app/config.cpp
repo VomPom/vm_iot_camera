@@ -45,17 +45,24 @@ Config Config::from_file(const std::string& path) {
     if (auto l = n["log"]) {
         c.log.level = l["level"].as<std::string>(c.log.level);
     }
-    // todo:: read pipeline config.
-    if (auto p = n["pipeline"]) {
-        c.pipeline.v4l2_nbuffers     = p["v4l2_nbuffers"    ].as<int>(c.pipeline.v4l2_nbuffers);
-        c.pipeline.encoder_buffers   = p["encoder_buffers"  ].as<int>(c.pipeline.encoder_buffers);
-        c.pipeline.queue_max_buffers = p["queue_max_buffers"].as<int>(c.pipeline.queue_max_buffers);
-        c.pipeline.queue_leaky       = p["queue_leaky"      ].as<std::string>(c.pipeline.queue_leaky);
-    }
 
     if (auto f = n["filter"]) {
-        c.filter.enabled    = f["enabled"   ].as<bool>       (c.filter.enabled);
-        c.filter.shader     = f["shader"    ].as<std::string>(c.filter.shader);
+        c.filter.enabled      = f["enabled"     ].as<bool>       (c.filter.enabled);
+        c.filter.shader       = f["shader"      ].as<std::string>(c.filter.shader);
+        c.filter.filter_type  = f["filter_type" ].as<int>        (c.filter.filter_type);
+        c.filter.max_type     = f["max_type"    ].as<int>        (c.filter.max_type);
+        c.filter.control_fifo = f["control_fifo"].as<std::string>(c.filter.control_fifo);
+
+        // 取值合法性校验
+        if (c.filter.max_type < 0) {
+            spdlog::warn("filter.max_type={} invalid, reset to 0", c.filter.max_type);
+            c.filter.max_type = 0;
+        }
+        if (c.filter.filter_type < 0 || c.filter.filter_type > c.filter.max_type) {
+            spdlog::warn("filter.filter_type={} out of [0,{}], reset to 0",
+                         c.filter.filter_type, c.filter.max_type);
+            c.filter.filter_type = 0;
+        }
     }
 
     return c;

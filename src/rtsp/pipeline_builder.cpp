@@ -24,13 +24,6 @@ std::string PipelineBuilder::encoder_str(const EncoderConfig& e, std::string& sr
            << " bitrate=" << e.bitrate_kbps
            << " gop-size=" << e.gop;
     } else if (e.backend == "v4l2m2m") {
-        // src_fmt = "NV12";
-        // os << "v4l2h264enc extra-controls=\"controls"
-        //    << ",h264_profile=4"
-        //    << ",video_bitrate=" << (e.bitrate_kbps * 1000)
-        //    << ",h264_i_frame_period=" << e.gop
-        //    << ",h264_b_frames=" << e.bframes
-        //    << "\"";
         // 使用dmabuf
         src_fmt = "NV12";
         os << "v4l2h264enc"
@@ -63,76 +56,36 @@ std::string downstream_for(const std::string& backend) {
     return "videoconvert ! queue max-size-buffers=2 leaky=downstream"; // x264 软编兜底
 }
 
-std::string PipelineBuilder::build(const Config& c, Mode mode) {
+std::string PipelineBuilder::build(const Config& c) {
     std::string src_fmt;
     std::string enc       = encoder_str(c.encoder, src_fmt);
 
     std::ostringstream os;
 
-    if (mode == Mode::Dmabuf) {
-        // ---------------- 真机零拷贝路径（暂未启用，detect_mode 永远 fallback 到 mmap）----------------
-        // 保留代码骨架，等真机硬件调通 dmabuf 后再回来打磨。
-        // 这里同样去掉 yaml 驱动的 filter_chain_str，避免历史遗留逻辑产生干扰。
-        os << "( v4l2src device=" << c.capture.device
-           << " do-timestamp=true io-mode=4"
-           << " ! video/x-raw(memory:DMABuf),format=" << c.capture.pixfmt
-           << ",width="     << c.capture.width
-           << ",height="    << c.capture.height
-           << ",framerate=" << c.capture.framerate << "/1"
+    os << "( v4l2src device=" << c.capture.device << " do-timestamp=true"
+       << " ! video/x-raw,format=" << c.capture.pixfmt
+       << ",width="     << c.capture.width
+       << ",height="    << c.capture.height
+       << ",framerate=" << c.capture.framerate << "/1"
+       << " ! videoconvert ! videoconvert";
 
-           // 官方推荐写法：进入 GL 域之前先用 videoconvert 隔离 v4l2 池子
-           << " ! videoconvert ! videoconvert"
-           << " ! glupload ! glcolorconvert"
-           << " ! gleffects effect=heat"
-           << " ! glcolorconvert ! gldownload"
-           << " ! videoconvert ! videoconvert"
-
-           // M3 §T3.3：按编码器后端切换承接子串（统一 queue 出口）
-           << " ! " << downstream_for(c.encoder.backend)
-
-           // 编码器 + 打包
-           << " ! " << enc
-           << " ! h264parse config-interval=1"
-           << " ! rtph264pay name=pay0 pt=96 mtu=1400 )";
-
-    } else {
-        os << "( v4l2src device=" << c.capture.device << " do-timestamp=true"
-           << " ! video/x-raw,format=" << c.capture.pixfmt
-           << ",width="     << c.capture.width
-           << ",height="    << c.capture.height
-           << ",framerate=" << c.capture.framerate << "/1"
-           << " ! videoconvert ! videoconvert";
-
-        // GL 滤镜段：仅当 filter.enabled 为 true 才插入。
-        // 元素名 f0 是内部约定（rtsp_server 会按名查找并 g_object_set fragment），
-        // 对外只暴露 yaml 中的 filter.enabled / filter.shader / filter.shader_dir。
-        if (c.filter.enabled) {
-            os << " ! glupload ! glcolorconvert"
-               << " ! glshader name=f0"
-               << " ! glcolorconvert ! gldownload";
-        }
-
-        os // 下 GL 后强制 I420（4:2:0），否则 x264 会抱怨 "baseline profile doesn't support 4:4:4"。
-           << " ! videoconvert ! video/x-raw,format=I420 ! videoconvert"
-
-           // 编码与打包
-           << " ! queue max-size-buffers=2 leaky=downstream"
-           << " ! " << enc
-           << " ! h264parse config-interval=1"
-           << " ! rtph264pay name=pay0 pt=96 mtu=1400 )";
+    // GL 滤镜段：仅当 filter.enabled 为 true 才插入。
+    // 元素名 f0 是内部约定（rtsp_server 会按名查找并 g_object_set fragment + uniforms），
+    // 对外只暴露 yaml 中的 filter.enabled / filter.shader / filter.filter_type / filter.max_type。
+    if (c.filter.enabled) {
+        os << " ! glupload ! glcolorconvert"
+           << " ! glshader name=f0"
+           << " ! glcolorconvert ! gldownload";
     }
+
+    os << " ! videoconvert ! video/x-raw,format=" << src_fmt
+       << " ! videoconvert"
+
+       // 编码与打包
+       << " ! queue max-size-buffers=2 leaky=downstream"
+       << " ! " << enc
+       << " ! h264parse config-interval=1"
+       << " ! rtph264pay name=pay0 pt=96 mtu=1400 )";
+
     return os.str();
-}
-
-
-PipelineBuilder::Mode PipelineBuilder::detect_mode(const Config& c) {
-    /* 先试 dmabuf */
-    // auto launch_dma = build(c, Mode::Dmabuf);
-    // if (try_pipeline(launch_dma)) {
-    //     LOGI("dmabuf pipeline OK, using zero-copy path");
-    //     return Mode::Dmabuf;
-    // }
-    // LOGW("dmabuf path failed, fallback to mmap+videoconvert");
-    // todo:: dmabuf utm 目前还不支持，后面使用硬件再说
-    return Mode::Mmap;
 }
