@@ -11,11 +11,19 @@
 #include <yaml-cpp/yaml.h>
 #include <getopt.h>
 #include <string>
+#include <filesystem>
 #include <spdlog/spdlog.h>
 
 Config Config::from_file(const std::string& path) {
     Config c;
     YAML::Node n = YAML::LoadFile(path);
+
+    try {
+        c.config_dir = std::filesystem::absolute(path)
+                            .parent_path().lexically_normal().string();
+    } catch (...) {
+        c.config_dir.clear();
+    }
 
     if (auto s = n["server"]) {
         c.server.port  = s["port"].as<uint16_t>(c.server.port);
@@ -43,6 +51,11 @@ Config Config::from_file(const std::string& path) {
         c.pipeline.encoder_buffers   = p["encoder_buffers"  ].as<int>(c.pipeline.encoder_buffers);
         c.pipeline.queue_max_buffers = p["queue_max_buffers"].as<int>(c.pipeline.queue_max_buffers);
         c.pipeline.queue_leaky       = p["queue_leaky"      ].as<std::string>(c.pipeline.queue_leaky);
+    }
+
+    if (auto f = n["filter"]) {
+        c.filter.enabled    = f["enabled"   ].as<bool>       (c.filter.enabled);
+        c.filter.shader     = f["shader"    ].as<std::string>(c.filter.shader);
     }
 
     return c;

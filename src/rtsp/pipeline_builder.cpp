@@ -96,42 +96,24 @@ std::string PipelineBuilder::build(const Config& c, Mode mode) {
            << " ! rtph264pay name=pay0 pt=96 mtu=1400 )";
 
     } else {
-        // ---------------- mmap 降级路径（UTM / 无 dmabuf 真机）----------------
-        //
-        // 设计原则：
-        //   1) 按 GStreamer 官方 GL tutorial 的最简形态搭建，不堆 caps-change-mode、
-        //      不锁中间层 caps，不在 launch 字符串里写 GLSL；
-        //   2) v4l2src 与 GL 元件之间用两层 videoconvert 隔开，让 GL 的
-        //      propose_allocation 不会反向影响 v4l2 池子分配
-        //      （之前 not-negotiated / "Uncertain or not enough buffers"
-        //       / 单帧画面，根因都在这里）；
-        //   3) 滤镜先用 GStreamer 自带的 gleffects effect=heat 验证 GL 通路稳定。
-        //      通过后再切换为 glshader + 自定义 fragment（后续工作，单独提交）。
-        //
-        // 形态：
-        //   v4l2src ! videoconvert ! videoconvert
-        //          ! glupload ! glcolorconvert
-        //          ! gleffects effect=heat
-        //          ! glcolorconvert ! gldownload
-        //          ! videoconvert ! videoconvert
-        //          ! queue ! x264enc ! h264parse ! rtph264pay
         os << "( v4l2src device=" << c.capture.device << " do-timestamp=true"
            << " ! video/x-raw,format=" << c.capture.pixfmt
            << ",width="     << c.capture.width
            << ",height="    << c.capture.height
            << ",framerate=" << c.capture.framerate << "/1"
+           << " ! videoconvert ! videoconvert";
 
-           // 官方推荐：两层 videoconvert 把 v4l2 与 GL 池子彻底隔开
-           << " ! videoconvert ! videoconvert"
+        // GL 滤镜段：仅当 filter.enabled 为 true 才插入。
+        // 元素名 f0 是内部约定（rtsp_server 会按名查找并 g_object_set fragment），
+        // 对外只暴露 yaml 中的 filter.enabled / filter.shader / filter.shader_dir。
+        if (c.filter.enabled) {
+            os << " ! glupload ! glcolorconvert"
+               << " ! glshader name=f0"
+               << " ! glcolorconvert ! gldownload";
+        }
 
-           // GL 段：上传 → 颜色转 → 滤镜（占位用 gleffects）→ 颜色转 → 下载
-           // 不锁任何中间 caps，让 glcolorconvert 自己协商 RGBA / 尺寸
-           << " ! glupload ! glcolorconvert"
-           << " ! gleffects effect=heat"
-           << " ! glcolorconvert ! gldownload"
-
-           // 下 GL 后再两层 videoconvert，保证编码器吃到正确的格式
-           << " ! videoconvert ! videoconvert"
+        os // 下 GL 后强制 I420（4:2:0），否则 x264 会抱怨 "baseline profile doesn't support 4:4:4"。
+           << " ! videoconvert ! video/x-raw,format=I420 ! videoconvert"
 
            // 编码与打包
            << " ! queue max-size-buffers=2 leaky=downstream"
@@ -142,30 +124,6 @@ std::string PipelineBuilder::build(const Config& c, Mode mode) {
     return os.str();
 }
 
-
-
-static bool try_pipeline(const std::string& launch, int wait_ms = 1500) {
-    GError* err = nullptr;
-    GstElement* p = gst_parse_launch(launch.c_str(), &err);
-    if (!p) {
-        LOGW("parse_launch failed: {}", err ? err->message : "?");
-        if (err) g_error_free(err);
-        return false;
-    }
-    GstStateChangeReturn r = gst_element_set_state(p, GST_STATE_PAUSED);
-    if (r == GST_STATE_CHANGE_FAILURE) {
-        gst_element_set_state(p, GST_STATE_NULL);
-        gst_object_unref(p);
-        return false;
-    }
-    /* 等一会儿看是否真的进入 PAUSED */
-    GstState st;
-    gst_element_get_state(p, &st, nullptr, wait_ms * GST_MSECOND);
-    bool ok = (st == GST_STATE_PAUSED);
-    gst_element_set_state(p, GST_STATE_NULL);
-    gst_object_unref(p);
-    return ok;
-}
 
 PipelineBuilder::Mode PipelineBuilder::detect_mode(const Config& c) {
     /* 先试 dmabuf */

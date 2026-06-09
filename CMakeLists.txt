@@ -37,14 +37,6 @@ target_link_libraries(vm_iot PUBLIC
         PkgConfig::GST yaml-cpp spdlog::spdlog Threads::Threads)
 
 # ---- 资源同步 ----
-# 构建后在可执行文件输出目录创建一个指向项目根 config/ 的符号链接，
-# 这样运行时打开的就是源文件本身：编辑 config/*.yaml 后无需重新构建，
-# 重启进程即可生效（彻底解决"改了配置不生效需要重新 build"的问题）。
-#
-# 步骤：
-# 1) 先尝试删除已有的链接/目录（rm -f 对不存在的路径不会报错），
-#    避免历史遗留的真实拷贝目录或失效软链阻塞 create_symlink；
-# 2) 重新创建软链：$<TARGET_FILE_DIR:vm_iot>/config -> ${CMAKE_SOURCE_DIR}/config
 add_custom_command(TARGET vm_iot POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E rm -rf
                 $<TARGET_FILE_DIR:vm_iot>/config
@@ -52,6 +44,15 @@ add_custom_command(TARGET vm_iot POST_BUILD
                 ${CMAKE_SOURCE_DIR}/config
                 $<TARGET_FILE_DIR:vm_iot>/config
         COMMENT "Linking config/ -> $<TARGET_FILE_DIR:vm_iot>/config (symlink)"
+        VERBATIM)
+
+add_custom_command(TARGET vm_iot POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -rf
+                $<TARGET_FILE_DIR:vm_iot>/shaders
+        COMMAND ${CMAKE_COMMAND} -E create_symlink
+                ${CMAKE_SOURCE_DIR}/shaders
+                $<TARGET_FILE_DIR:vm_iot>/shaders
+        COMMENT "Linking shaders/ -> $<TARGET_FILE_DIR:vm_iot>/shaders (symlink)"
         VERBATIM)
 
 # ---- 单元测试 ----

@@ -45,12 +45,8 @@ struct PipelineConfig {
 };
 
 struct FilterConfig {
-    bool   enable_f1     = true;     // 双边磨皮
-    bool   enable_f3     = false;     // 锐化
-    float  sigma_space   = 4.0f;
-    float  sigma_color   = 0.10f;
-    float  unsharp_amount= 0.5f;
-    std::string shader_dir = "/home/ubuntu/Desktop/JW/vm_iot/shaders";
+    bool        enabled    = true;
+    std::string shader     = "mosaic.frag";
 };
 
 struct Config {
@@ -61,10 +57,10 @@ struct Config {
     PipelineConfig pipeline;
     FilterConfig filter;
 
-    /* 从 yaml 文件读，失败抛 std::runtime_error */
+    std::string config_dir;
+
     static Config from_file(const std::string &path);
 
-    /* 用 CLI 覆盖（CLI > yaml > 默认）*/
     void merge_cli(int argc, char **argv);
 };
 
