@@ -22,14 +22,30 @@ public:
     bool start(const Config& cfg, ShaderFilter* filter);
     void stop();
 
-private:
-    static void on_client_connected(GstRTSPServer* /*s*/, GstRTSPClient* c, gpointer user);
+    /* 当前 RTSP 客户端连接数（线程安全：内部走 gst_rtsp_server_client_filter）。
+     * 未 start 或已 stop 时返回 0。 */
+    int client_count() const;
 
-    /* 在 media 解析完 launch 字符串、但尚未进入 PLAYING 时回调，
-     * 将事件转发给 ShaderFilter 完成 fragment 注入与 uniforms 写入。 */
+private:
+    /* ---- server 级信号 ---- */
+    static void on_client_connected(GstRTSPServer* /*s*/, GstRTSPClient* c, gpointer user);
+    static void on_client_closed(GstRTSPClient* c, gpointer user);
+
+    /* ---- media 级信号 ----
+     * media-configure：在 launch 解析完、未 PLAYING 前回调；
+     *                  我们在这里 (1) 转发给 ShaderFilter 注入 fragment；
+     *                  (2) 拿到内部 pipeline 的 GstBus 挂上 watch；
+     *                  (3) 监听 prepared / unprepared 用于观测 media 生命周期。 */
     static void on_media_configure(GstRTSPMediaFactory* factory,
                                    GstRTSPMedia*        media,
                                    gpointer             user);
+    static void on_media_prepared(GstRTSPMedia* media, gpointer user);
+    static void on_media_unprepared(GstRTSPMedia* media, gpointer user);
+
+    /* ---- pipeline bus watch ----
+     * 在 GLib 主线程异步回调，仅做日志记录，不主动 unprepare。
+     * 返回 TRUE 表示继续监听；FALSE 表示移除。 */
+    static gboolean on_bus_message(GstBus* bus, GstMessage* msg, gpointer user);
 
     GstRTSPServer*       server_  = nullptr;
     GstRTSPMountPoints*  mounts_  = nullptr;

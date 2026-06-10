@@ -6,12 +6,15 @@
 
 #include "control_channel.h"
 #include "shader_filter.h"
+#include "rtsp_server.h"
+#include "config.h"
 #include "log.h"
 
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <cerrno>
 #include <cstring>
 #include <cctype>
 #include <sstream>
@@ -34,23 +37,43 @@ static std::vector<std::string> split_ws(const std::string& s) {
     return out;
 }
 
-bool ControlChannel::start(const std::string& fifo_path, ShaderFilter* filter) {
-    if (fifo_path.empty()) {
-        LOGI("control channel: disabled (empty path)");
-        return true;
+bool ControlChannel::start(const std::string& req_path,
+                           const std::string& reply_path,
+                           ShaderFilter*      filter,
+                           const Config*      cfg,
+                           const RtspServer*  server,
+                           std::chrono::steady_clock::time_point start_time) {
+    filter_     = filter;
+    cfg_        = cfg;
+    server_     = server;
+    start_time_ = start_time;
+
+    /* 1) 请求 FIFO（必须有 filter，否则 ShaderFilter 命令无意义；但不强求 server/cfg）。 */
+    if (req_path.empty()) {
+        LOGI("control channel: disabled (empty req path)");
+    } else {
+        req_path_ = req_path;
+        if (mkfifo(req_path_.c_str(), 0600) != 0 && errno != EEXIST) {
+            LOGW("control channel: mkfifo({}) failed: {}", req_path_, std::strerror(errno));
+            return false;
+        }
+        if (!reopen_fifo()) return false;
+        LOGI("control channel: listening on FIFO {}", req_path_);
     }
-    path_ = fifo_path;
-    filter_ = filter;
 
-    /* mkfifo 已存在则忽略 EEXIST。其它错误（比如目录不存在）直接告警并放弃。 */
-    if (mkfifo(path_.c_str(), 0600) != 0 && errno != EEXIST) {
-        LOGW("control channel: mkfifo({}) failed: {}", path_, std::strerror(errno));
-        return false;
+    /* 2) 回执 FIFO（可选）。 */
+    if (!reply_path.empty()) {
+        reply_path_ = reply_path;
+        if (mkfifo(reply_path_.c_str(), 0600) != 0 && errno != EEXIST) {
+            LOGW("control channel: mkfifo reply({}) failed: {}", reply_path_, std::strerror(errno));
+            reply_path_.clear();
+        } else if (!open_reply_fifo()) {
+            reply_path_.clear();
+        } else {
+            LOGI("control channel: reply FIFO ready at {}", reply_path_);
+        }
     }
 
-    if (!reopen_fifo()) return false;
-
-    LOGI("control channel: listening on FIFO {}", path_);
     return true;
 }
 
@@ -68,9 +91,9 @@ bool ControlChannel::reopen_fifo() {
      * 单纯 O_RDONLY | O_NONBLOCK 在没有写端时 read 返回 0 导致 watch 一直触发。
      * O_RDWR 让内核把我们自己也当作写端，poll/read 在无数据时阻塞等待真正写端，
      * 行为更稳定（这是 daemon 监听 FIFO 的常用 trick）。 */
-    int fd = ::open(path_.c_str(), O_RDWR | O_NONBLOCK);
+    int fd = ::open(req_path_.c_str(), O_RDWR | O_NONBLOCK);
     if (fd < 0) {
-        LOGW("control channel: open({}) failed: {}", path_, std::strerror(errno));
+        LOGW("control channel: open({}) failed: {}", req_path_, std::strerror(errno));
         return false;
     }
 
@@ -85,6 +108,35 @@ bool ControlChannel::reopen_fifo() {
     return true;
 }
 
+bool ControlChannel::open_reply_fifo() {
+    if (reply_fd_ >= 0) {
+        ::close(reply_fd_);
+        reply_fd_ = -1;
+    }
+    /* 同样用 O_RDWR：避免没有 reader 时 open(O_WRONLY) 阻塞或 ENXIO；
+     * 我们自己持有读端，但只用写端写入。 */
+    int fd = ::open(reply_path_.c_str(), O_RDWR | O_NONBLOCK);
+    if (fd < 0) {
+        LOGW("control channel: open reply({}) failed: {}", reply_path_, std::strerror(errno));
+        return false;
+    }
+    reply_fd_ = fd;
+    return true;
+}
+
+void ControlChannel::write_reply(const std::string& payload) {
+    if (reply_fd_ < 0 || payload.empty()) return;
+    ssize_t n = ::write(reply_fd_, payload.data(), payload.size());
+    if (n < 0) {
+        /* EAGAIN：管道满（4KB 默认）或暂时无空间；EPIPE：理论上 O_RDWR 不会出现。
+         * 都按"丢弃应答"处理，仅记录一次告警。 */
+        LOGW("control channel: write reply failed: {} ({} bytes pending)",
+             std::strerror(errno), payload.size());
+    } else if (static_cast<size_t>(n) < payload.size()) {
+        LOGW("control channel: short write reply ({} of {})", n, payload.size());
+    }
+}
+
 void ControlChannel::stop() {
     if (watch_id_) {
         g_source_remove(watch_id_);
@@ -94,11 +146,21 @@ void ControlChannel::stop() {
         g_io_channel_unref(channel_);
         channel_ = nullptr;
     }
-    if (!path_.empty()) {
-        ::unlink(path_.c_str());   // 清理 FIFO 节点
-        path_.clear();
+    if (!req_path_.empty()) {
+        ::unlink(req_path_.c_str());
+        req_path_.clear();
+    }
+    if (reply_fd_ >= 0) {
+        ::close(reply_fd_);
+        reply_fd_ = -1;
+    }
+    if (!reply_path_.empty()) {
+        ::unlink(reply_path_.c_str());
+        reply_path_.clear();
     }
     filter_ = nullptr;
+    cfg_    = nullptr;
+    server_ = nullptr;
 }
 
 gboolean ControlChannel::on_readable(GIOChannel* src, GIOCondition cond, gpointer user) {
@@ -142,55 +204,171 @@ gboolean ControlChannel::on_readable(GIOChannel* src, GIOCondition cond, gpointe
     return G_SOURCE_CONTINUE;
 }
 
-void ControlChannel::handle_line(const std::string& line) const {
-    if (!filter_) return;
+/* ─────────────────────────── 回执构造工具 ─────────────────────────── */
+std::string ControlChannel::make_ok(const std::string& cmd_line, const std::string& body) {
+    std::string out;
+    out.reserve(cmd_line.size() + body.size() + 8);
+    out.append("ok ").append(cmd_line).append("\n");
+    if (!body.empty()) {
+        out.append(body);
+        if (body.back() != '\n') out.append("\n");
+    }
+    out.append(".\n");
+    return out;
+}
+
+std::string ControlChannel::make_err(const std::string& cmd_line, const std::string& reason) {
+    std::string out;
+    out.reserve(cmd_line.size() + reason.size() + 8);
+    out.append("err ").append(cmd_line);
+    if (!reason.empty()) out.append(" ").append(reason);
+    out.append("\n.\n");
+    return out;
+}
+
+/* ─────────────────────────── 命令分派 ─────────────────────────── */
+void ControlChannel::handle_line(const std::string& line) {
     auto toks = split_ws(line);
     if (toks.empty()) return;
 
     const std::string& cmd = toks[0];
+    std::string reply;
 
     if (cmd == "filter") {
-        if (toks.size() < 2) {
-            LOGW("control: 'filter' missing argument");
-            return;
-        }
-        const std::string& arg = toks[1];
-        if (arg == "next") {
-            int t = filter_->next();
-            LOGI("control: filter next -> {}", t);
-        } else if (arg == "prev") {
-            int t = filter_->prev();
-            LOGI("control: filter prev -> {}", t);
-        } else if (arg == "get") {
-            LOGI("control: filter get -> {}", filter_->current_type());
-        } else if (arg == "set") {
-            if (toks.size() < 3) {
-                LOGW("control: 'filter set' missing value");
-                return;
-            }
-            try {
-                int t = std::stoi(toks[2]);
-                bool ok = filter_->set_type(t);
-                LOGI("control: filter set {} -> {}", t, ok ? "ok" : "fail");
-            } catch (...) {
-                LOGW("control: invalid filter value '{}'", toks[2]);
-            }
-        } else if (!arg.empty() && (std::isdigit((unsigned char)arg[0]) || arg[0] == '-')) {
-            // 兼容写法：filter <N>
-            try {
-                int t = std::stoi(arg);
-                bool ok = filter_->set_type(t);
-                LOGI("control: filter {} -> {}", t, ok ? "ok" : "fail");
-            } catch (...) {
-                LOGW("control: invalid filter value '{}'", arg);
-            }
-        } else {
-            LOGW("control: unknown filter subcommand '{}'", arg);
-        }
+        reply = handle_filter(toks);
     } else if (cmd == "reload") {
-        bool ok = filter_->reload();
-        LOGI("control: reload -> {}", ok ? "ok" : "fail");
+        reply = handle_reload();
+    } else if (cmd == "status") {
+        reply = handle_status();
     } else {
         LOGW("control: unknown command '{}'", cmd);
+        reply = make_err(line, "unknown_command");
     }
+
+    write_reply(reply);
+}
+
+std::string ControlChannel::handle_filter(const std::vector<std::string>& toks) {
+    const std::string& line = [&]{
+        std::string s;
+        for (size_t i = 0; i < toks.size(); ++i) {
+            if (i) s += ' ';
+            s += toks[i];
+        }
+        return s;
+    }();
+
+    if (!filter_) {
+        LOGW("control: filter command but no ShaderFilter attached");
+        return make_err(line, "filter_disabled");
+    }
+    if (toks.size() < 2) {
+        LOGW("control: 'filter' missing argument");
+        return make_err(line, "missing_argument");
+    }
+
+    const std::string& arg = toks[1];
+
+    auto reply_with_type = [&](const std::string& action, int t, bool ok) {
+        std::string body = "type=" + std::to_string(t);
+        LOGI("control: filter {} -> {}", action, ok ? std::to_string(t) : "fail");
+        return ok ? make_ok(line, body) : make_err(line, "apply_failed");
+    };
+
+    if (arg == "next") {
+        int t = filter_->next();
+        return reply_with_type("next", t, t >= 0);
+    }
+    if (arg == "prev") {
+        int t = filter_->prev();
+        return reply_with_type("prev", t, t >= 0);
+    }
+    if (arg == "get") {
+        int t = filter_->current_type();
+        LOGI("control: filter get -> {}", t);
+        return make_ok(line, "type=" + std::to_string(t));
+    }
+    if (arg == "set") {
+        if (toks.size() < 3) {
+            LOGW("control: 'filter set' missing value");
+            return make_err(line, "missing_value");
+        }
+        try {
+            int t = std::stoi(toks[2]);
+            bool ok = filter_->set_type(t);
+            return reply_with_type("set " + toks[2], t, ok);
+        } catch (...) {
+            LOGW("control: invalid filter value '{}'", toks[2]);
+            return make_err(line, "invalid_value");
+        }
+    }
+    if (!arg.empty() && (std::isdigit((unsigned char)arg[0]) || arg[0] == '-')) {
+        // 兼容写法：filter <N>
+        try {
+            int t = std::stoi(arg);
+            bool ok = filter_->set_type(t);
+            return reply_with_type(arg, t, ok);
+        } catch (...) {
+            LOGW("control: invalid filter value '{}'", arg);
+            return make_err(line, "invalid_value");
+        }
+    }
+
+    LOGW("control: unknown filter subcommand '{}'", arg);
+    return make_err(line, "unknown_subcommand");
+}
+
+std::string ControlChannel::handle_reload() {
+    if (!filter_) {
+        LOGW("control: reload but no ShaderFilter attached");
+        return make_err("reload", "filter_disabled");
+    }
+    bool ok = filter_->reload();
+    LOGI("control: reload -> {}", ok ? "ok" : "fail");
+    return ok ? make_ok("reload", "") : make_err("reload", "reload_failed");
+}
+
+std::string ControlChannel::handle_status() const {
+    /* 状态字段尽量"自描述"：key=value 单行；外部可 grep / awk。 */
+    std::ostringstream os;
+
+    /* 1) uptime（秒，整数）。 */
+    auto now = std::chrono::steady_clock::now();
+    auto secs = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_).count();
+    os << "uptime_sec=" << secs << "\n";
+
+    /* 2) 滤镜状态（filter 可能为 nullptr）。 */
+    if (filter_) {
+        os << "filter_enabled=true\n"
+           << "filter_type="    << filter_->current_type() << "\n";
+    } else {
+        os << "filter_enabled=false\n";
+    }
+    if (cfg_) {
+        os << "filter_max="    << cfg_->filter.max_type << "\n"
+           << "filter_shader=" << cfg_->filter.shader   << "\n";
+    }
+
+    /* 3) 客户端连接数 + RTSP 入口。 */
+    if (server_) {
+        os << "clients=" << server_->client_count() << "\n";
+    }
+    if (cfg_) {
+        os << "rtsp_url=rtsp://0.0.0.0:" << cfg_->server.port << cfg_->server.mount << "\n";
+    }
+
+    /* 4) 编码 & 采集快照（只读，便于运维核对配置 vs 实际）。 */
+    if (cfg_) {
+        os << "encoder="              << cfg_->encoder.backend       << "\n"
+           << "encoder_bitrate_kbps=" << cfg_->encoder.bitrate_kbps  << "\n"
+           << "capture="              << cfg_->capture.width  << "x"
+                                      << cfg_->capture.height << "@"
+                                      << cfg_->capture.framerate    << "\n"
+           << "capture_device="       << cfg_->capture.device        << "\n"
+           << "capture_pixfmt="       << cfg_->capture.pixfmt        << "\n";
+    }
+
+    LOGI("control: status (uptime={}s, clients={})",
+         secs, server_ ? server_->client_count() : -1);
+    return make_ok("status", os.str());
 }

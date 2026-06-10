@@ -6,6 +6,7 @@
 #include "common/log.h"
 #include <gst/gst.h>
 #include <getopt.h>
+#include <chrono>
 #include <string>
 #include <filesystem>
 #include <cstdlib>
@@ -22,6 +23,9 @@ static std::string extract_config_path(int argc, char** argv) {
 
 int main(int argc, char** argv) {
     gst_init(&argc, &argv);
+
+    /* 启动时间用于 status 命令计算 uptime；steady_clock 不受系统时间调整影响。 */
+    auto start_time = std::chrono::steady_clock::now();
 
     Config cfg;
     try {
@@ -56,9 +60,17 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    /* FIFO 命令通道：运行时热切换 filter_type / reload shader。 */
+    /* FIFO 命令通道：运行时热切换 filter_type / reload shader / 查询状态。
+     * - 请求 FIFO（control_fifo）必填才会监听；
+     * - 回执 FIFO（control_reply）选填，配置后命令会有结构化应答。
+     * - 传入 cfg/server/t0 让 status 命令能取到运行时与配置信息。 */
     ControlChannel ctrl;
-    ctrl.start(cfg.filter.control_fifo, cfg.filter.enabled ? &filter : nullptr);
+    ctrl.start(cfg.filter.control_fifo,
+               cfg.filter.control_reply,
+               cfg.filter.enabled ? &filter : nullptr,
+               &cfg,
+               &server,
+               start_time);
 
     g_main_loop_run(loop);             // 阻塞，SIGINT/SIGTERM 退出
 

@@ -60,7 +60,17 @@
 //     filter <N>                   兼容写法，等价于 filter set <N>
 //     filter get                   打印当前 type
 //     reload                       重新读取 shader 文件并重新注入
+//     status                       打印运行状态（uptime / 客户端数 / 编码 / 滤镜等）
 //   非法命令记 warning，不会让进程崩溃。
+//
+// ─────────────────────────── 回执协议 ───────────────────────────
+//   配置 filter.control_reply 后，daemon 会把每条命令的应答写入该 FIFO：
+//     成功：  ok <cmd...>\n[k=v\n]*.\n        // 终结符为单独一行的 "."
+//     失败：  err <cmd...> <reason>\n.\n
+//   外部用法：
+//     $ cat /tmp/vm_iot.reply &        # 后台读
+//     $ echo "status" > /tmp/vm_iot.ctl
+//   注意：reply 是非阻塞写，若读端不存在会丢弃应答（仅日志告警）。
 //
 // ─────────────────────────── 调试方法 ───────────────────────────
 //   $ echo "filter next"   > /tmp/vm_iot.ctl
@@ -72,28 +82,62 @@
 #define VM_IOT_CONTROL_CHANNEL_H
 
 #include <glib.h>
+#include <chrono>
 #include <string>
+#include <vector>
 
 class ShaderFilter;
+class RtspServer;
+struct Config;
 
 class ControlChannel {
 public:
-    /* path 为空串时直接返回 true 但不开启监听，便于 main 无脑调用。
+    /* 启动控制通道。
+     *   req_path / reply_path 为空串时分别表示"不开请求 FIFO"/"不写回执"。
+     *   filter / cfg / server 必须在 ControlChannel 生命周期内保持存活。
+     *   start_time 用于 status 命令计算 uptime；通常传 main 启动时记录的 steady_clock::now()。
      * 失败返回 false（mkfifo / open 错误）；成功后 source 已挂到默认 GMainContext。 */
-    bool start(const std::string& fifo_path, ShaderFilter* filter);
+    bool start(const std::string& req_path,
+               const std::string& reply_path,
+               ShaderFilter*      filter,
+               const Config*      cfg,
+               const RtspServer*  server,
+               std::chrono::steady_clock::time_point start_time);
     void stop();
 
 private:
     static gboolean on_readable(GIOChannel* src, GIOCondition cond, gpointer user);
-    void handle_line(const std::string& line) const;
+    void handle_line(const std::string& line);
 
-    /* 重新打开 FIFO：写端关闭后 GIOChannel 会 EOF，必须重新 open 才能继续等下一个写端。 */
+    /* 重新打开请求 FIFO：写端关闭后 GIOChannel 会 EOF，必须重新 open 才能继续等下一个写端。 */
     bool reopen_fifo();
 
-    std::string   path_;
-    ShaderFilter* filter_ = nullptr;
+    /* 打开 / 重开 reply FIFO（O_RDWR | O_NONBLOCK，避免无读端时 open 阻塞）。 */
+    bool open_reply_fifo();
+
+    /* 把一段已构造好的应答字符串非阻塞写入 reply FIFO。
+     * 没配置 reply / 写失败时仅 LOGW，不影响主流程。 */
+    void write_reply(const std::string& payload);
+
+    /* 各命令实现：返回 reply 字符串（含终结符 ".\n"）。 */
+    std::string handle_filter(const std::vector<std::string>& toks);
+    std::string handle_reload();
+    std::string handle_status() const;
+
+    /* 工具：构造 "ok <line>\n<body>.\n" / "err <line> <reason>\n.\n"。 */
+    static std::string make_ok(const std::string& cmd_line, const std::string& body);
+    static std::string make_err(const std::string& cmd_line, const std::string& reason);
+
+    std::string   req_path_;
+    std::string   reply_path_;
+    ShaderFilter* filter_  = nullptr;
+    const Config* cfg_     = nullptr;
+    const RtspServer* server_ = nullptr;
+    std::chrono::steady_clock::time_point start_time_{};
+
     GIOChannel*   channel_ = nullptr;
     guint         watch_id_ = 0;
+    int           reply_fd_ = -1;        // -1 = 未启用或未打开
 };
 
 #endif //VM_IOT_CONTROL_CHANNEL_H

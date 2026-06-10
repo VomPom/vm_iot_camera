@@ -41,7 +41,8 @@ struct FilterConfig {
     std::string shader     = "effects.frag";         // 单一 shader 文件；运行时通过 uniform filter_type 切换分支
     int         filter_type = 0;                     // 启动默认特效：0=passthrough 1=mosaic 2=invert ...
     int         max_type    = 2;                     // filter next/prev 循环上限（含），与 shader 内 if 分支保持一致
-    std::string control_fifo;                        // FIFO 控制通道路径，空串=不开启
+    std::string control_fifo;                        // FIFO 控制通道路径（请求），空串=不开启
+    std::string control_reply;                       // FIFO 回执通道路径（应答），空串=不写回执
 };
 
 struct Config {

@@ -52,6 +52,7 @@ Config Config::from_file(const std::string& path) {
         c.filter.filter_type  = f["filter_type" ].as<int>        (c.filter.filter_type);
         c.filter.max_type     = f["max_type"    ].as<int>        (c.filter.max_type);
         c.filter.control_fifo = f["control_fifo"].as<std::string>(c.filter.control_fifo);
+        c.filter.control_reply = f["control_reply"].as<std::string>(c.filter.control_reply);
 
         // 取值合法性校验
         if (c.filter.max_type < 0) {

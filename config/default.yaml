@@ -8,15 +8,16 @@ capture:
   framerate: 30
   pixfmt: I420 # I420 UYVY
 encoder:
-  backend: x264          # vaapi | nvenc | v4l2m2m | x264
+  backend: x264          # x264 | openh264 | x265   （仅支持纯软编后端）
   bitrate_kbps: 4000
   gop: 30
-  bframes: 0
+  bframes: 0             # 仅 x264 生效；openh264 / x265 忽略此项
 filter:
   enabled: true                       # 总开关：false 时 pipeline 不插入 GL 滤镜段
   shader: effects.frag                # 单一着色器文件；相对路径以 config/../shaders 为基目录
   filter_type: 0                      # 启动默认特效：0=passthrough 1=mosaic 2=invert
   max_type: 2                         # filter next 循环上限（含），与 shader 内 if 分支保持一致
-  control_fifo: /tmp/vm_iot.ctl       # 运行时控制 FIFO；空串=不开启
+  control_fifo: /tmp/vm_iot.ctl       # 运行时控制 FIFO（请求）；空串=不开启
+  control_reply: /tmp/vm_iot.reply    # 命令回执 FIFO（应答）；空串=不写回执
 log:
   level: info             # trace|debug|info|warn|err

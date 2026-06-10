@@ -2,8 +2,9 @@
 
 A lightweight RTSP camera daemon built on top of **GStreamer** and the
 **gst-rtsp-server** library. It captures frames from a V4L2 device,
-encodes them to H.264 via a pluggable backend (VAAPI / NVENC / V4L2 M2M /
-x264), and exposes the stream through a configurable RTSP mount point.
+encodes them via a pluggable software backend (`x264` / `openh264` for
+H.264, `x265` for H.265), and exposes the stream through a configurable
+RTSP mount point.
 
 The project targets Linux IoT / edge boxes where you want a single, small,
 config-driven binary instead of a hand-written `gst-launch` shell script.
@@ -14,7 +15,10 @@ config-driven binary instead of a hand-written `gst-launch` shell script.
 
 - **YAML-driven configuration** with full CLI overrides
   (`CLI > YAML > built-in defaults`).
-- **Pluggable H.264 encoders**: `vaapi`, `nvenc`, `v4l2m2m`, `x264`.
+- **Pluggable software encoders**: `x264` / `openh264` (H.264) and
+  `x265` (H.265). Hardware backends (VAAPI / NVENC / V4L2 M2M) were
+  removed as they are unavailable on the target environment
+  (Ubuntu under UTM / aarch64).
 - **Single shared pipeline** for all RTSP clients
   (`gst_rtsp_media_factory_set_shared(TRUE)`) — CPU does not scale with
   the number of viewers.
@@ -125,9 +129,15 @@ rtsp://<host>:8554/live
 Quick playback:
 
 ```bash
+# H.264 (backend: x264 / openh264)
 gst-launch-1.0 -v rtspsrc location=rtsp://127.0.0.1:8554/live ! \
     rtph264depay ! avdec_h264 ! videoconvert ! autovideosink
-# or
+
+# H.265 (backend: x265)
+gst-launch-1.0 -v rtspsrc location=rtsp://127.0.0.1:8554/live ! \
+    rtph265depay ! avdec_h265 ! videoconvert ! autovideosink
+
+# Codec-agnostic (decodebin auto-detects):
 ffplay rtsp://127.0.0.1:8554/live
 ```
 
@@ -148,10 +158,10 @@ capture:
   framerate: 30
   pixfmt: UYVY            # raw format coming out of the camera
 encoder:
-  backend: x264           # vaapi | nvenc | v4l2m2m | x264
+  backend: x264           # x264 | openh264 | x265
   bitrate_kbps: 4000
   gop: 30
-  bframes: 0
+  bframes: 0              # only honored by x264; ignored by openh264 / x265
 log:
   level: info             # trace | debug | info | warn | err
 ```
@@ -180,18 +190,22 @@ no need to rebuild.
 
 ## Encoder backends
 
-| backend   | GStreamer element | Typical hardware              |
-|-----------|-------------------|-------------------------------|
-| `vaapi`   | `vaapih264enc`    | Intel iGPU (VA-API)           |
-| `nvenc`   | `nvh264enc`       | NVIDIA GPU (NVENC)            |
-| `v4l2m2m` | `v4l2h264enc`     | ARM SoC HW codec (Pi, Rockchip…) |
-| `x264`    | `x264enc`         | Pure software fallback        |
+Only pure-software encoders are supported. The target deployment
+(Ubuntu under UTM / aarch64) has no usable hardware encoder, so the
+VAAPI / NVENC / V4L2 M2M backends were removed.
 
-The pipeline is built dynamically in
-[`PipelineBuilder::build`](src/rtsp/pipeline_builder.cpp); the source
-pixel format requested from the camera comes from `capture.pixfmt` and
-is converted to the format expected by the chosen encoder via
-`videoconvert`.
+| backend    | codec  | GStreamer element | Notes                                                          |
+|------------|--------|-------------------|----------------------------------------------------------------|
+| `x264`     | H.264  | `x264enc`         | Default. Best compatibility, good speed/quality trade-off.     |
+| `openh264` | H.264  | `openh264enc`     | Cisco's H.264 encoder. No B-frames; `bframes` is ignored.      |
+| `x265`     | H.265  | `x265enc`         | Lower bitrate at same quality, ~1.5–2× CPU; client must support HEVC. |
+
+`PipelineBuilder::build` ([src/rtsp/pipeline_builder.cpp](src/rtsp/pipeline_builder.cpp))
+picks the matching parser and RTP payloader automatically: H.264
+backends use `h264parse` + `rtph264pay`, `x265` uses `h265parse` +
+`rtph265pay`. The source pixel format requested from the camera comes
+from `capture.pixfmt` and is converted to `I420` (the input format all
+three software encoders expect) via `videoconvert`.
 
 ---
 
@@ -240,7 +254,11 @@ you need to debug capture / encoding outside of the daemon.
   requested `width / height / framerate / pixfmt` combination
   (`v4l2-ctl --list-formats-ext -d /dev/video0`).
 - **`unknown encoder backend: ...`** — `encoder.backend` must be one of
-  `vaapi | nvenc | v4l2m2m | x264`.
+  `x264 | openh264 | x265`.
+- **HEVC client cannot play the stream** — when `backend: x265`, the
+  server emits an H.265 RTP stream (`rtph265pay`); make sure your
+  player supports HEVC (recent VLC / `ffplay` work; many browsers and
+  mobile players do not).
 
 ---
 

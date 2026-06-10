@@ -1,8 +1,9 @@
 select_backend() {
     if [ "${BACKEND:-auto}" != "auto" ]; then echo "$BACKEND"; return; fi
-    if gst-inspect-1.0 vaapih264enc      >/dev/null 2>&1; then echo vaapi;   return; fi
-    if gst-inspect-1.0 nvh264enc         >/dev/null 2>&1; then echo nvenc;   return; fi
-    if gst-inspect-1.0 v4l2h264enc       >/dev/null 2>&1; then echo v4l2m2m; return; fi
+    # 仅在三种纯软编里挑：优先 x264（兼容/性能折中最优），其次 openh264，最后 x265。
+    if gst-inspect-1.0 x264enc     >/dev/null 2>&1; then echo x264;     return; fi
+    if gst-inspect-1.0 openh264enc >/dev/null 2>&1; then echo openh264; return; fi
+    if gst-inspect-1.0 x265enc     >/dev/null 2>&1; then echo x265;     return; fi
     echo x264
 }
 
@@ -10,11 +11,8 @@ select_backend() {
 select_src_fmt() {
     local enc="$1"
     case "$enc" in
-      vaapi)   echo YUY2;;
-      nvenc)   echo YUY2;;
-      v4l2m2m) echo NV12;;
-      x264)    echo UYVY;;
-      *)       echo YUY2;;
+      x264|openh264|x265) echo I420;;
+      *)                  echo I420;;
     esac
 }
 
@@ -23,17 +21,15 @@ build_enc_str() {
     BR="${BR:-4000}"; GOP="${GOP:-30}"
     SRC_FMT="$(select_src_fmt "$enc")"
     case "$enc" in
-      vaapi)
-        ENC_STR="vaapih264enc rate-control=cbr bitrate=$BR keyframe-period=$GOP tune=low-power"
-        PRE="videoconvert ! video/x-raw,format=NV12";;
-      nvenc)
-        ENC_STR="nvh264enc preset=low-latency-hp rc-mode=cbr bitrate=$BR gop-size=$GOP"
-        PRE="videoconvert ! video/x-raw,format=NV12";;
-      v4l2m2m)
-        ENC_STR="v4l2h264enc extra-controls=\"controls,h264_profile=4,video_bitrate=$((BR*1000)),h264_i_frame_period=$GOP\""
-        PRE="";;
       x264)
         ENC_STR="x264enc tune=zerolatency speed-preset=ultrafast bitrate=$BR key-int-max=$GOP bframes=0"
+        PRE="videoconvert";;
+      openh264)
+        # openh264 用 bps 单位
+        ENC_STR="openh264enc bitrate=$((BR*1000)) gop-size=$GOP complexity=low rate-control=bitrate"
+        PRE="videoconvert";;
+      x265)
+        ENC_STR="x265enc tune=zerolatency speed-preset=ultrafast bitrate=$BR key-int-max=$GOP"
         PRE="videoconvert";;
     esac
     export ENC_STR SRC_FMT PRE
