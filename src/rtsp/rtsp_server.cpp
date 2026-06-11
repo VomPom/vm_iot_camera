@@ -24,8 +24,10 @@
 #include "rtsp_server.h"
 #include "pipeline_builder.h"
 #include "shader_filter.h"
+#include "snapshot.h"
 #include "log.h"
 #include "config.h"
+#include "launch_pretty.h"
 
 /* 取 client peer ip，统一一处避免到处写。 */
 static const gchar* client_ip(GstRTSPClient* c) {
@@ -117,6 +119,11 @@ void RtspServer::on_media_configure(GstRTSPMediaFactory* /*factory*/,
         self->filter_->attach_to_media(media);
     }
 
+    /* 1.5) 交给 Snapshot 抓取 snap_valve / snap_sink。 */
+    if (self->snapshot_) {
+        self->snapshot_->attach_to_media(media);
+    }
+
     /* 2) 挂 bus watch：拿到 media 的内部 pipeline → 它的 bus → add_watch。
      *    pipeline / bus 销毁时 watch 自动失效，无需保存 source_id。 */
     GstElement* pipeline = gst_rtsp_media_get_element(media);
@@ -147,8 +154,9 @@ void RtspServer::on_media_unprepared(GstRTSPMedia* /*media*/, gpointer /*user*/)
     LOGI("media unprepared (released)");
 }
 
-bool RtspServer::start(const Config& cfg, ShaderFilter* filter) {
-    filter_ = filter;
+bool RtspServer::start(const Config& cfg, ShaderFilter* filter, Snapshot* snapshot) {
+    filter_   = filter;
+    snapshot_ = snapshot;
 
     server_ = gst_rtsp_server_new();
     if (!server_) {
@@ -163,7 +171,10 @@ bool RtspServer::start(const Config& cfg, ShaderFilter* filter) {
     factory_ = gst_rtsp_media_factory_new();
 
     std::string launch = PipelineBuilder::build(cfg);
-    LOGI("rtsp launch: {}", launch);
+    /* 调试可读形态：分组缩进，便于一眼看出主线/各副线拓扑。
+     * 单行原始串也保留，方便复制粘贴到 gst-launch-1.0 复现问题。 */
+    LOGI("rtsp pipeline:\n{}", launch_pretty::render(launch));
+    LOGI("rtsp launch (raw): {}", launch);
     gst_rtsp_media_factory_set_launch(factory_, launch.c_str());
 
     gst_rtsp_media_factory_set_shared(factory_, TRUE);
@@ -200,7 +211,8 @@ void RtspServer::stop() {
         g_object_unref(server_);
         server_ = nullptr;
     }
-    filter_ = nullptr;
+    filter_   = nullptr;
+    snapshot_ = nullptr;
 }
 
 int RtspServer::client_count() const {

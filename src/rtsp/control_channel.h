@@ -88,13 +88,14 @@
 
 class ShaderFilter;
 class RtspServer;
+class Snapshot;
 struct Config;
 
 class ControlChannel {
 public:
     /* 启动控制通道。
      *   req_path / reply_path 为空串时分别表示"不开请求 FIFO"/"不写回执"。
-     *   filter / cfg / server 必须在 ControlChannel 生命周期内保持存活。
+     *   filter / cfg / server / snapshot 必须在 ControlChannel 生命周期内保持存活。
      *   start_time 用于 status 命令计算 uptime；通常传 main 启动时记录的 steady_clock::now()。
      * 失败返回 false（mkfifo / open 错误）；成功后 source 已挂到默认 GMainContext。 */
     bool start(const std::string& req_path,
@@ -102,6 +103,7 @@ public:
                ShaderFilter*      filter,
                const Config*      cfg,
                const RtspServer*  server,
+               Snapshot*          snapshot,
                std::chrono::steady_clock::time_point start_time);
     void stop();
 
@@ -123,6 +125,7 @@ private:
     std::string handle_filter(const std::vector<std::string>& toks);
     std::string handle_reload();
     std::string handle_status() const;
+    std::string handle_snapshot(const std::vector<std::string>& toks) const;
 
     /* 工具：构造 "ok <line>\n<body>.\n" / "err <line> <reason>\n.\n"。 */
     static std::string make_ok(const std::string& cmd_line, const std::string& body);
@@ -133,6 +136,7 @@ private:
     ShaderFilter* filter_  = nullptr;
     const Config* cfg_     = nullptr;
     const RtspServer* server_ = nullptr;
+    Snapshot*     snapshot_ = nullptr;
     std::chrono::steady_clock::time_point start_time_{};
 
     GIOChannel*   channel_ = nullptr;

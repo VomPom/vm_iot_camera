@@ -7,6 +7,7 @@
 #include "control_channel.h"
 #include "shader_filter.h"
 #include "rtsp_server.h"
+#include "snapshot.h"
 #include "config.h"
 #include "log.h"
 
@@ -42,10 +43,12 @@ bool ControlChannel::start(const std::string& req_path,
                            ShaderFilter*      filter,
                            const Config*      cfg,
                            const RtspServer*  server,
+                           Snapshot*          snapshot,
                            std::chrono::steady_clock::time_point start_time) {
     filter_     = filter;
     cfg_        = cfg;
     server_     = server;
+    snapshot_   = snapshot;
     start_time_ = start_time;
 
     /* 1) 请求 FIFO（必须有 filter，否则 ShaderFilter 命令无意义；但不强求 server/cfg）。 */
@@ -161,6 +164,7 @@ void ControlChannel::stop() {
     filter_ = nullptr;
     cfg_    = nullptr;
     server_ = nullptr;
+    snapshot_ = nullptr;
 }
 
 gboolean ControlChannel::on_readable(GIOChannel* src, GIOCondition cond, gpointer user) {
@@ -240,6 +244,8 @@ void ControlChannel::handle_line(const std::string& line) {
         reply = handle_reload();
     } else if (cmd == "status") {
         reply = handle_status();
+    } else if (cmd == "snapshot") {
+        reply = handle_snapshot(toks);
     } else {
         LOGW("control: unknown command '{}'", cmd);
         reply = make_err(line, "unknown_command");
@@ -371,4 +377,35 @@ std::string ControlChannel::handle_status() const {
     LOGI("control: status (uptime={}s, clients={})",
          secs, server_ ? server_->client_count() : -1);
     return make_ok("status", os.str());
+}
+
+std::string ControlChannel::handle_snapshot(const std::vector<std::string>& toks) const
+{
+    /* 还原命令行用于 reply 回显。 */
+    std::string line;
+    for (size_t i = 0; i < toks.size(); ++i) {
+        if (i) line += ' ';
+        line += toks[i];
+    }
+
+    if (!snapshot_) {
+        LOGW("control: snapshot but module not attached");
+        return make_err(line, "snapshot_disabled");
+    }
+    if (!snapshot_->ready()) {
+        LOGW("control: snapshot but pipeline not ready (no client connected?)");
+        return make_err(line, "pipeline_not_ready");
+    }
+
+    /* 可选第二参数 = 自定义保存路径；空则由模块按时间戳生成。 */
+    std::string out_path = (toks.size() >= 2) ? toks[1] : std::string();
+    std::string err;
+    bool ok = snapshot_->take(out_path, err);
+    if (!ok) {
+        LOGW("control: snapshot failed: {}", err);
+        return make_err(line, err.empty() ? "unknown" : err);
+    }
+
+    LOGI("control: snapshot -> {}", out_path);
+    return make_ok(line, "path=" + out_path);
 }

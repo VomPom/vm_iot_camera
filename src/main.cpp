@@ -2,6 +2,7 @@
 #include "signal_handler.h"
 #include "rtsp_server.h"
 #include "shader_filter.h"
+#include "snapshot.h"
 #include "control_channel.h"
 #include "common/log.h"
 #include <gst/gst.h>
@@ -55,7 +56,12 @@ int main(int argc, char** argv) {
     }
 
     RtspServer server;
-    if (!server.start(cfg, cfg.filter.enabled ? &filter : nullptr)) {
+    Snapshot   snapshot;
+    /* 截图副线与其他副线平级：独立于 RtspServer，只需 RtspServer 在 media-configure
+     * 时帮它 attach。默认输出目录 /tmp/vm_iot/snapshots，可被命令行传入的路径覆盖。 */
+    snapshot.configure("/tmp/vm_iot/snapshots", 90, 1500);
+
+    if (!server.start(cfg, cfg.filter.enabled ? &filter : nullptr, &snapshot)) {
         g_main_loop_unref(loop);
         return 2;
     }
@@ -70,12 +76,14 @@ int main(int argc, char** argv) {
                cfg.filter.enabled ? &filter : nullptr,
                &cfg,
                &server,
+               &snapshot,
                start_time);
 
     g_main_loop_run(loop);             // 阻塞，SIGINT/SIGTERM 退出
 
     ctrl.stop();
     server.stop();
+    snapshot.shutdown();
     filter.shutdown();
     g_main_loop_unref(loop);
     LOGI("iotcam exited cleanly");

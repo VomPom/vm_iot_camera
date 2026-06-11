@@ -14,12 +14,13 @@
 
 struct Config;
 class ShaderFilter;
+class Snapshot;
 
 class RtspServer {
 public:
-    /* filter 可为 nullptr：表示 pipeline 不带 GL 滤镜段。
-     * filter 必须在 RtspServer 生命周期内保持存活，本类不拥有它。 */
-    bool start(const Config& cfg, ShaderFilter* filter);
+    /* filter / snapshot 可为 nullptr：分别表示 pipeline 不带 GL 滤镜段 / 不启用截图副线。
+     * 两者必须在 RtspServer 生命周期内保持存活，本类不拥有它们。 */
+    bool start(const Config& cfg, ShaderFilter* filter, Snapshot* snapshot);
     void stop();
 
     /* 当前 RTSP 客户端连接数（线程安全：内部走 gst_rtsp_server_client_filter）。
@@ -52,7 +53,8 @@ private:
     GstRTSPMediaFactory* factory_ = nullptr;
     guint                source_id_ = 0;
 
-    ShaderFilter*        filter_ = nullptr;   // 不拥有，仅持指针
+    ShaderFilter*        filter_   = nullptr;   // 不拥有，仅持指针
+    Snapshot*            snapshot_ = nullptr;   // 不拥有，仅持指针
 };
 
 #endif //VM_IOT_RTSP_SERVER_H

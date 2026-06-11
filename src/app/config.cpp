@@ -12,6 +12,11 @@
 #include <getopt.h>
 #include <string>
 #include <filesystem>
+#include <functional>
+#include <unordered_map>
+#include <stdexcept>
+#include <cstdio>
+#include <cstdlib>
 #include <spdlog/spdlog.h>
 
 Config Config::from_file(const std::string& path) {
@@ -69,14 +74,109 @@ Config Config::from_file(const std::string& path) {
     return c;
 }
 
-/* getopt_long 解析命令行；只覆盖被显式传入的字段 */
+/* ─────────────────────────── CLI 覆盖：setter 表 ───────────────────────────
+ * 设计目标：
+ *   1) 字段路径与 YAML 完全对齐（capture.width 在 yaml 即 capture: { width }），
+ *      减少心智成本；新增配置只需在表里加 1 行。
+ *   2) 快捷键（--port / --device / --bitrate / --log-level）保留向后兼容，
+ *      内部转译为 setter 表的同一份逻辑，不出现两套。
+ *   3) 未知 key、非法值 → 立即 exit，避免 typo 静默生效。
+ */
+namespace {
+
+/* 解析助手：抛出 std::invalid_argument 让上层统一报错。 */
+int parse_int(const std::string& v, const std::string& key) {
+    try { return std::stoi(v); }
+    catch (...) { throw std::invalid_argument("invalid int for '" + key + "': " + v); }
+}
+uint16_t parse_u16(const std::string& v, const std::string& key) {
+    int x = parse_int(v, key);
+    if (x < 0 || x > 65535) throw std::invalid_argument("port out of range for '" + key + "': " + v);
+    return static_cast<uint16_t>(x);
+}
+bool parse_bool(const std::string& v, const std::string& key) {
+    std::string s; s.reserve(v.size());
+    for (char c : v) s.push_back(static_cast<char>(::tolower(c)));
+    if (s == "1" || s == "true"  || s == "yes" || s == "on")  return true;
+    if (s == "0" || s == "false" || s == "no"  || s == "off") return false;
+    throw std::invalid_argument("invalid bool for '" + key + "': " + v);
+}
+
+using Setter = std::function<void(Config&, const std::string&)>;
+
+/* setter 表：唯一字段事实来源。 */
+const std::unordered_map<std::string, Setter>& setters() {
+    static const std::unordered_map<std::string, Setter> kMap = {
+        {"server.port",          [](Config& c, const std::string& v){ c.server.port  = parse_u16(v, "server.port"); }},
+        {"server.mount",         [](Config& c, const std::string& v){ c.server.mount = v; }},
+
+        {"capture.device",       [](Config& c, const std::string& v){ c.capture.device    = v; }},
+        {"capture.width",        [](Config& c, const std::string& v){ c.capture.width     = parse_int(v, "capture.width"); }},
+        {"capture.height",       [](Config& c, const std::string& v){ c.capture.height    = parse_int(v, "capture.height"); }},
+        {"capture.framerate",    [](Config& c, const std::string& v){ c.capture.framerate = parse_int(v, "capture.framerate"); }},
+        {"capture.pixfmt",       [](Config& c, const std::string& v){ c.capture.pixfmt    = v; }},
+
+        {"encoder.backend",      [](Config& c, const std::string& v){ c.encoder.backend      = v; }},
+        {"encoder.bitrate_kbps", [](Config& c, const std::string& v){ c.encoder.bitrate_kbps = parse_int(v, "encoder.bitrate_kbps"); }},
+        {"encoder.gop",          [](Config& c, const std::string& v){ c.encoder.gop          = parse_int(v, "encoder.gop"); }},
+        {"encoder.bframes",      [](Config& c, const std::string& v){ c.encoder.bframes      = parse_int(v, "encoder.bframes"); }},
+
+        {"log.level",            [](Config& c, const std::string& v){ c.log.level = v; }},
+
+        {"filter.enabled",       [](Config& c, const std::string& v){ c.filter.enabled       = parse_bool(v, "filter.enabled"); }},
+        {"filter.shader",        [](Config& c, const std::string& v){ c.filter.shader        = v; }},
+        {"filter.filter_type",   [](Config& c, const std::string& v){ c.filter.filter_type   = parse_int(v, "filter.filter_type"); }},
+        {"filter.max_type",      [](Config& c, const std::string& v){ c.filter.max_type      = parse_int(v, "filter.max_type"); }},
+        {"filter.control_fifo",  [](Config& c, const std::string& v){ c.filter.control_fifo  = v; }},
+        {"filter.control_reply", [](Config& c, const std::string& v){ c.filter.control_reply = v; }},
+    };
+    return kMap;
+}
+
+/* 应用一条 key=value，未知 key / 非法值都 exit(2)。 */
+void apply_kv(Config& cfg, const std::string& key, const std::string& value) {
+    const auto& m = setters();
+    auto it = m.find(key);
+    if (it == m.end()) {
+        std::fprintf(stderr, "unknown config key: '%s'\n  available keys:\n", key.c_str());
+        for (const auto& [k, _] : m) std::fprintf(stderr, "    %s\n", k.c_str());
+        std::exit(2);
+    }
+    try {
+        it->second(cfg, value);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "config error: %s\n", e.what());
+        std::exit(2);
+    }
+}
+
+void print_help() {
+    std::printf(
+        "Usage: iotcam [OPTIONS]\n"
+        "  -c, --config FILE         load YAML config (default: config/default.yaml)\n"
+        "  -d, --device PATH         alias of --set capture.device=PATH\n"
+        "  -p, --port N              alias of --set server.port=N\n"
+        "  -b, --bitrate KBPS        alias of --set encoder.bitrate_kbps=KBPS\n"
+        "  -l, --log-level LEVEL     alias of --set log.level=LEVEL\n"
+        "      --set KEY=VALUE       override any config field; KEY uses YAML dotted path\n"
+        "  -h, --help                show this help\n"
+        "\nAvailable --set keys:\n");
+    for (const auto& [k, _] : setters()) std::printf("  %s\n", k.c_str());
+}
+
+} // namespace
+
+/* getopt_long 解析命令行；只覆盖被显式传入的字段。
+ * --set 与快捷键可任意混用，按出现顺序逐条应用，等价覆盖。 */
 void Config::merge_cli(int argc, char** argv) {
+    enum { OPT_SET = 1000 };
     static const struct option opts[] = {
         {"config",     required_argument, nullptr, 'c'},
         {"device",     required_argument, nullptr, 'd'},
         {"port",       required_argument, nullptr, 'p'},
         {"bitrate",    required_argument, nullptr, 'b'},
         {"log-level",  required_argument, nullptr, 'l'},
+        {"set",        required_argument, nullptr, OPT_SET},
         {"help",       no_argument,       nullptr, 'h'},
         {nullptr, 0, nullptr, 0}
     };
@@ -84,16 +184,27 @@ void Config::merge_cli(int argc, char** argv) {
     optind = 1;
     while ((opt = getopt_long(argc, argv, "c:d:p:b:l:h", opts, nullptr)) != -1) {
         switch (opt) {
-            case 'd': capture.device       = optarg; break;
-            case 'p': server.port          = static_cast<uint16_t>(std::stoi(optarg)); break;
-            case 'b': encoder.bitrate_kbps = std::stoi(optarg); break;
-            case 'l': log.level            = optarg; break;
+            case 'd': apply_kv(*this, "capture.device",       optarg); break;
+            case 'p': apply_kv(*this, "server.port",          optarg); break;
+            case 'b': apply_kv(*this, "encoder.bitrate_kbps", optarg); break;
+            case 'l': apply_kv(*this, "log.level",            optarg); break;
             case 'c': /* 在 main 中提前处理过 */ break;
+            case OPT_SET: {
+                std::string kv = optarg;
+                auto eq = kv.find('=');
+                if (eq == std::string::npos || eq == 0) {
+                    std::fprintf(stderr, "--set expects KEY=VALUE, got '%s'\n", optarg);
+                    std::exit(2);
+                }
+                apply_kv(*this, kv.substr(0, eq), kv.substr(eq + 1));
+                break;
+            }
             case 'h':
-                std::printf(
-                    "Usage: iotcam [--config FILE] [--device PATH] [--port N]\n"
-                    "              [--bitrate KBPS] [--log-level LEVEL]\n");
+                print_help();
                 std::exit(0);
+            case '?':
+                /* getopt_long 已经打印过错误信息 */
+                std::exit(2);
         }
     }
 }
