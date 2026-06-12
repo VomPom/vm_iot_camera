@@ -17,7 +17,12 @@ filter:
   shader: effects.frag                # 单一着色器文件；相对路径以 config/../shaders 为基目录
   filter_type: 0                      # 启动默认特效：0=passthrough 1=mosaic 2=invert
   max_type: 2                         # filter next 循环上限（含），与 shader 内 if 分支保持一致
-  control_fifo: /tmp/vm_iot.ctl       # 运行时控制 FIFO（请求）；空串=不开启
-  control_reply: /tmp/vm_iot.reply    # 命令回执 FIFO（应答）；空串=不写回执
+control:
+  request_fifo: /tmp/vm_iot.ctl       # 命令请求 FIFO；空串=不开启控制通道
+  reply_fifo:   /tmp/vm_iot.reply     # 命令应答 FIFO；空串=不写回执
+snapshot:
+  dir: /tmp/vm_iot/snapshots          # 默认输出目录；snapshot 命令未带 path 时使用
+  quality: 90                         # JPEG 质量（预留，当前 jpegenc 未启用）
+  timeout_ms: 1500                    # 单次截图等待 buffer 落盘超时
 log:
   level: info             # trace|debug|info|warn|err

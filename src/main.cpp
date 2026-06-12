@@ -1,10 +1,10 @@
-#include "app/config.h"
+#include "config.h"
 #include "signal_handler.h"
 #include "rtsp_server.h"
 #include "shader_filter.h"
 #include "snapshot.h"
 #include "control_channel.h"
-#include "common/log.h"
+#include "log.h"
 #include <gst/gst.h>
 #include <getopt.h>
 #include <chrono>
@@ -58,8 +58,8 @@ int main(int argc, char** argv) {
     RtspServer server;
     Snapshot   snapshot;
     /* 截图副线与其他副线平级：独立于 RtspServer，只需 RtspServer 在 media-configure
-     * 时帮它 attach。默认输出目录 /tmp/vm_iot/snapshots，可被命令行传入的路径覆盖。 */
-    snapshot.configure("/tmp/vm_iot/snapshots", 90, 1500);
+     * 时帮它 attach。输出目录 / 质量 / 超时都由 cfg.snapshot 供给。 */
+    snapshot.configure(cfg.snapshot.dir, cfg.snapshot.quality, cfg.snapshot.timeout_ms);
 
     if (!server.start(cfg, cfg.filter.enabled ? &filter : nullptr, &snapshot)) {
         g_main_loop_unref(loop);
@@ -67,12 +67,12 @@ int main(int argc, char** argv) {
     }
 
     /* FIFO 命令通道：运行时热切换 filter_type / reload shader / 查询状态。
-     * - 请求 FIFO（control_fifo）必填才会监听；
-     * - 回执 FIFO（control_reply）选填，配置后命令会有结构化应答。
+     * - 请求 FIFO（control.request_fifo）必填才会监听；
+     * - 应答 FIFO（control.reply_fifo）选填，配置后命令会有结构化应答。
      * - 传入 cfg/server/t0 让 status 命令能取到运行时与配置信息。 */
     ControlChannel ctrl;
-    ctrl.start(cfg.filter.control_fifo,
-               cfg.filter.control_reply,
+    ctrl.start(cfg.control.request_fifo,
+               cfg.control.reply_fifo,
                cfg.filter.enabled ? &filter : nullptr,
                &cfg,
                &server,

@@ -17,19 +17,28 @@ find_package(yaml-cpp REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(Threads REQUIRED)
 
-file(GLOB src-files
-        ${CMAKE_SOURCE_DIR}/src/*.cpp
-        ${CMAKE_SOURCE_DIR}/src/rtsp/*.cpp
-        ${CMAKE_SOURCE_DIR}/src/app/*.cpp)
+# 递归收集 src/ 下所有 .cpp，排除独立可执行体 cli/。
+# 选用 GLOB_RECURSE 是有意为之：源码按职责分多目录（pipeline/filter/branches/control/...），
+# 新增子目录无需再回来改 CMake。CMake 不会自动感知 glob 变化——
+# 需要新增/删除文件时请手动 cmake --build 时附带 reconfigure，或重跑 cmake。
+file(GLOB_RECURSE src-files CONFIGURE_DEPENDS
+        ${CMAKE_SOURCE_DIR}/src/*.cpp)
+list(FILTER src-files EXCLUDE REGEX "${CMAKE_SOURCE_DIR}/src/cli/")
 
 add_executable(vm_iot
         ${src-files})
 
+# 扁平 include 风格：所有头文件直接 #include "xxx.h"，不带子目录前缀。
+# 每新增一个 src/ 子目录，请同步加到这里。
 target_include_directories(vm_iot
         PUBLIC
-        src/rtsp
         src/app
         src/common
+        src/pipeline
+        src/filter
+        src/branches/snapshot
+        src/control
+        src/rtsp
 )
 
 

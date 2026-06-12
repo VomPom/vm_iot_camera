@@ -52,12 +52,10 @@ Config Config::from_file(const std::string& path) {
     }
 
     if (auto f = n["filter"]) {
-        c.filter.enabled      = f["enabled"     ].as<bool>       (c.filter.enabled);
-        c.filter.shader       = f["shader"      ].as<std::string>(c.filter.shader);
-        c.filter.filter_type  = f["filter_type" ].as<int>        (c.filter.filter_type);
-        c.filter.max_type     = f["max_type"    ].as<int>        (c.filter.max_type);
-        c.filter.control_fifo = f["control_fifo"].as<std::string>(c.filter.control_fifo);
-        c.filter.control_reply = f["control_reply"].as<std::string>(c.filter.control_reply);
+        c.filter.enabled      = f["enabled"    ].as<bool>       (c.filter.enabled);
+        c.filter.shader       = f["shader"     ].as<std::string>(c.filter.shader);
+        c.filter.filter_type  = f["filter_type"].as<int>        (c.filter.filter_type);
+        c.filter.max_type     = f["max_type"   ].as<int>        (c.filter.max_type);
 
         // 取值合法性校验
         if (c.filter.max_type < 0) {
@@ -68,6 +66,26 @@ Config Config::from_file(const std::string& path) {
             spdlog::warn("filter.filter_type={} out of [0,{}], reset to 0",
                          c.filter.filter_type, c.filter.max_type);
             c.filter.filter_type = 0;
+        }
+    }
+
+    if (auto ctl = n["control"]) {
+        c.control.request_fifo = ctl["request_fifo"].as<std::string>(c.control.request_fifo);
+        c.control.reply_fifo   = ctl["reply_fifo"  ].as<std::string>(c.control.reply_fifo);
+    }
+
+    if (auto s = n["snapshot"]) {
+        c.snapshot.dir        = s["dir"       ].as<std::string>(c.snapshot.dir);
+        c.snapshot.quality    = s["quality"   ].as<int>        (c.snapshot.quality);
+        c.snapshot.timeout_ms = s["timeout_ms"].as<int>        (c.snapshot.timeout_ms);
+
+        if (c.snapshot.quality < 1 || c.snapshot.quality > 100) {
+            spdlog::warn("snapshot.quality={} out of [1,100], reset to 90", c.snapshot.quality);
+            c.snapshot.quality = 90;
+        }
+        if (c.snapshot.timeout_ms <= 0) {
+            spdlog::warn("snapshot.timeout_ms={} invalid, reset to 1500", c.snapshot.timeout_ms);
+            c.snapshot.timeout_ms = 1500;
         }
     }
 
@@ -127,8 +145,13 @@ const std::unordered_map<std::string, Setter>& setters() {
         {"filter.shader",        [](Config& c, const std::string& v){ c.filter.shader        = v; }},
         {"filter.filter_type",   [](Config& c, const std::string& v){ c.filter.filter_type   = parse_int(v, "filter.filter_type"); }},
         {"filter.max_type",      [](Config& c, const std::string& v){ c.filter.max_type      = parse_int(v, "filter.max_type"); }},
-        {"filter.control_fifo",  [](Config& c, const std::string& v){ c.filter.control_fifo  = v; }},
-        {"filter.control_reply", [](Config& c, const std::string& v){ c.filter.control_reply = v; }},
+
+        {"control.request_fifo", [](Config& c, const std::string& v){ c.control.request_fifo = v; }},
+        {"control.reply_fifo",   [](Config& c, const std::string& v){ c.control.reply_fifo   = v; }},
+
+        {"snapshot.dir",         [](Config& c, const std::string& v){ c.snapshot.dir         = v; }},
+        {"snapshot.quality",     [](Config& c, const std::string& v){ c.snapshot.quality     = parse_int(v, "snapshot.quality"); }},
+        {"snapshot.timeout_ms",  [](Config& c, const std::string& v){ c.snapshot.timeout_ms  = parse_int(v, "snapshot.timeout_ms"); }},
     };
     return kMap;
 }

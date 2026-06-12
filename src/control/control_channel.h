@@ -64,7 +64,7 @@
 //   非法命令记 warning，不会让进程崩溃。
 //
 // ─────────────────────────── 回执协议 ───────────────────────────
-//   配置 filter.control_reply 后，daemon 会把每条命令的应答写入该 FIFO：
+//   配置 control.reply_fifo 后，daemon 会把每条命令的应答写入该 FIFO：
 //     成功：  ok <cmd...>\n[k=v\n]*.\n        // 终结符为单独一行的 "."
 //     失败：  err <cmd...> <reason>\n.\n
 //   外部用法：

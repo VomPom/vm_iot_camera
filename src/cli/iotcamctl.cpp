@@ -228,7 +228,7 @@ void check_fifo(const std::string& path, const char* role) {
     if (::stat(path.c_str(), &st) != 0) {
         std::fprintf(stderr,
                      "iotcamctl: %s FIFO '%s' not found: %s\n"
-                     "  hint: is vm_iot running? check filter.control_fifo / control_reply in config\n",
+                     "  hint: is vm_iot running? check control.request_fifo / reply_fifo in config\n",
                      role, path.c_str(), std::strerror(errno));
         std::exit(10);
     }
