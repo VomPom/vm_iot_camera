@@ -35,11 +35,12 @@ Config Config::from_file(const std::string& path) {
         c.server.mount = s["mount"].as<std::string>(c.server.mount);
     }
     if (auto cap = n["capture"]) {
-        c.capture.device    = cap["device"   ].as<std::string>(c.capture.device);
-        c.capture.width     = cap["width"    ].as<int>        (c.capture.width);
-        c.capture.height    = cap["height"   ].as<int>        (c.capture.height);
-        c.capture.framerate = cap["framerate"].as<int>        (c.capture.framerate);
-        c.capture.pixfmt    = cap["pixfmt"   ].as<std::string>(c.capture.pixfmt);
+        c.capture.device      = cap["device"     ].as<std::string>(c.capture.device);
+        c.capture.width       = cap["width"      ].as<int>        (c.capture.width);
+        c.capture.height      = cap["height"     ].as<int>        (c.capture.height);
+        c.capture.framerate   = cap["framerate"  ].as<int>        (c.capture.framerate);
+        c.capture.pixfmt      = cap["pixfmt"     ].as<std::string>(c.capture.pixfmt);
+        c.capture.prefer_jpeg = cap["prefer_jpeg"].as<bool>       (c.capture.prefer_jpeg);
     }
     if (auto e = n["encoder"]) {
         c.encoder.backend      = e["backend"     ].as<std::string>(c.encoder.backend);
@@ -133,6 +134,7 @@ const std::unordered_map<std::string, Setter>& setters() {
         {"capture.height",       [](Config& c, const std::string& v){ c.capture.height    = parse_int(v, "capture.height"); }},
         {"capture.framerate",    [](Config& c, const std::string& v){ c.capture.framerate = parse_int(v, "capture.framerate"); }},
         {"capture.pixfmt",       [](Config& c, const std::string& v){ c.capture.pixfmt    = v; }},
+        {"capture.prefer_jpeg",  [](Config& c, const std::string& v){ c.capture.prefer_jpeg = parse_bool(v, "capture.prefer_jpeg"); }},
 
         {"encoder.backend",      [](Config& c, const std::string& v){ c.encoder.backend      = v; }},
         {"encoder.bitrate_kbps", [](Config& c, const std::string& v){ c.encoder.bitrate_kbps = parse_int(v, "encoder.bitrate_kbps"); }},

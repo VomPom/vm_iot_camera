@@ -10,6 +10,10 @@
 //
 
 #include "pipeline_builder.h"
+#include "caps_ranker.h"
+
+#include <cmath>
+#include <cstdint>
 
 std::string PipelineBuilder::encoder_str(const EncoderConfig& e, std::string& src_fmt) {
     std::ostringstream os;
@@ -46,38 +50,83 @@ std::string PipelineBuilder::encoder_str(const EncoderConfig& e, std::string& sr
     return os.str();
 }
 
+// ============================================================================
+// 静态纯函数：caps 字符串构造（可单测）
+// ============================================================================
+
+std::string PipelineBuilder::fps_to_fraction(double fps) {
+    if (fps <= 0.0) return "30/1";
+
+    // 常用 NTSC 分数帧率特判，落到精确分数避免 caps 协商飘移
+    constexpr double kEps = 1e-2;
+    if (std::fabs(fps - 29.97) < kEps) return "30000/1001";
+    if (std::fabs(fps - 59.94) < kEps) return "60000/1001";
+    if (std::fabs(fps - 23.976) < kEps) return "24000/1001";
+
+    // 整数 fps：直接 N/1
+    double rounded = std::round(fps);
+    if (std::fabs(fps - rounded) < 1e-3) {
+        std::ostringstream os;
+        os << static_cast<int64_t>(rounded) << "/1";
+        return os.str();
+    }
+
+    // 其他小数 fps：按 1000 倍数做兜底（120.10 → 120100/1000）
+    std::ostringstream os;
+    os << static_cast<int64_t>(std::round(fps * 1000.0)) << "/1000";
+    return os.str();
+}
+
+std::string PipelineBuilder::make_input_caps(const v4l2_prober::Capability& cap,
+                                             double fps) {
+    std::ostringstream os;
+    os << cap.media_type;
+    if (cap.media_type == "video/x-raw" && !cap.raw_format.empty()) {
+        os << ",format=" << cap.raw_format;
+    }
+    os << ",width="     << cap.width
+       << ",height="    << cap.height
+       << ",framerate=" << fps_to_fraction(fps);
+    return os.str();
+}
+
 /* ─────────────────────────── 管道架构总览 ───────────────────────────
  *
  *   build() 输出一条供 gst-rtsp-server 解析的 launch 字符串，整体结构如下：
  *
- *      v4l2src  ──►  videoconvert  ──►  [可选 GL 滤镜段]  ──►  videoconvert
- *                                                                   │
- *                                                                   ▼
- *                                                              tee  name=t
- *                                                          ┌────────┴────────┐
- *                                                          │                 │
- *                                                  ┌───────┘                 └──────────┐
- *                                                  ▼                                    ▼
- *                                          (主线 main)                           (副线 snapshot)
- *                                       推流：编码 + RTP 打包                    截图：JPEG 单帧落盘
- *                                                  │                                    │
- *                                                  ▼                                    ▼
- *                                  encoder ─► parse ─► rtph26Xpay              valve ─► jpegenc ─► multifilesink
- *                                            (name=pay0)                        (name=snap_valve / snap_sink)
+ *      v4l2src
+ *         │ (上游 caps 由 V4L2Prober + CapsRanker 决定，jpeg 或 raw 二选一)
+ *         ▼
+ *      [仅 jpeg 路径]  jpegparse ! jpegdec
+ *         │
+ *         ▼
+ *      videoconvert ! videoscale ! videorate
+ *         │ (下游统一 caps：format=cfg.capture.pixfmt + 期望分辨率/帧率)
+ *         ▼
+ *      videoconvert  ──►  [可选 GL 滤镜段]  ──►  videoconvert
+ *                                                       │
+ *                                                       ▼
+ *                                                 tee  name=t
+ *                                             ┌────────┴────────┐
+ *                                             │                 │
+ *                                     ┌───────┘                 └──────────┐
+ *                                     ▼                                    ▼
+ *                              (主线 main)                          (副线 snapshot)
+ *                            推流：编码 + RTP 打包                  截图：JPEG 单帧落盘
+ *                                     │                                    │
+ *                                     ▼                                    ▼
+ *                  encoder ─► parse ─► rtph26Xpay (name=pay0)    valve ─► jpegenc ─► multifilesink
+ *                                                                (name=snap_valve / snap_sink)
  *
  *   分流原则（添加新副线时遵循）：
  *     1) 所有副线统一从 tee  name=t  拉取，零拷贝、不影响主线。
- *     2) 每条副线开头必须有 `queue leaky=downstream max-size-buffers=2`：
- *        副线卡住时丢自己的帧，不反压主线推流。
- *     3) 每条副线首端放一个 `valve drop=true` 默认关闭：
- *        平时副线零开销，按需由 ControlChannel 打开 valve 触发动作。
- *     4) 副线内的元素命名遵循 `<branch>_<role>`（如 snap_valve / snap_sink），
- *        C++ 端通过 gst_bin_get_by_name() 抓取并控制。
- *     5) build() 内部按副线拆分成 append_branch_<x>() 函数，
- *        新增分流（录像 / AI 推理 / 运动检测）时只需追加一个 append 函数。
+ *     2) 每条副线开头必须有 `queue leaky=downstream max-size-buffers=2`。
+ *     3) 每条副线首端放一个 `valve drop=true` 默认关闭，按需打开。
+ *     4) 副线内的元素命名遵循 `<branch>_<role>`（如 snap_valve / snap_sink）。
+ *     5) build() 内部按副线拆分成 append_branch_<x>() 函数。
  *
  *   现有副线清单：
- *     - snapshot：JPEG 截图（默认 valve 关闭，iotcamctl snapshot 触发）
+ *     - snapshot：JPEG 截图
  *   规划副线：
  *     - record  ：分段 MP4 录像  (mp4mux ! filesink，valve 控制起停)
  *     - ai      ：appsink 喂 C++ 推理（人脸/物体检测）
@@ -105,8 +154,7 @@ static void append_branch_main(std::ostringstream& os,
  * 截图副线：tee. ! queue ! valve(默认关) ! convert ! jpegenc ! multifilesink
  * 运行时由 Snapshot 模块按 name=snap_valve / snap_sink 抓取并控制。
  * post-messages=true 让 sink 写完每个文件后发 element message，便于上层确认完成。
- *
- **/
+ */
 static void append_branch_snapshot(std::ostringstream& os) {
     os << " t. ! queue max-size-buffers=2 leaky=downstream silent=true"
        << " ! valve name=snap_valve drop=true"
@@ -117,6 +165,93 @@ static void append_branch_snapshot(std::ostringstream& os) {
        <<       " post-messages=true async=false sync=false";
 }
 
+// ============================================================================
+// 上游 source 段：探测 + 排序 + 兜底
+// ============================================================================
+
+namespace {
+
+/**
+ * 探测设备 + 排序，返回选中的 (Capability, fps)。
+ * 探测失败或排序后无候选时，返回 {false, ...}，由调用方走兜底。
+ */
+struct ChosenInput {
+    bool ok = false;
+    v4l2_prober::Capability cap;
+    double fps = 30.0;
+};
+
+ChosenInput choose_input(const Config& c) {
+    auto caps = v4l2_prober::probe(c.capture.device);
+    if (caps.empty()) {
+        LOGW("v4l2 probe returned empty for device={} (non-Linux or device unavailable)",
+             c.capture.device);
+        return {};
+    }
+    LOGI("v4l2 capabilities for {}:\n{}",
+         c.capture.device, v4l2_prober::format_table(caps));
+
+    caps_ranker::Preference pref;
+    pref.width       = static_cast<uint32_t>(c.capture.width);
+    pref.height      = static_cast<uint32_t>(c.capture.height);
+    pref.fps         = static_cast<double>(c.capture.framerate);
+    pref.prefer_jpeg = c.capture.prefer_jpeg;
+
+    auto ranked = caps_ranker::rank(caps, pref);
+    if (ranked.empty()) {
+        LOGW("caps_ranker produced no candidates");
+        return {};
+    }
+    LOGI("caps ranking (top {} of {}):\n{}",
+         std::min<size_t>(ranked.size(), 5),
+         ranked.size(),
+         caps_ranker::format_ranking(
+             {ranked.begin(),
+              ranked.begin() + std::min<size_t>(ranked.size(), 5)}));
+
+    ChosenInput out;
+    out.ok  = true;
+    out.cap = ranked.front().cap;
+    out.fps = ranked.front().chosen_fps;
+    LOGI("selected input: {} @ {:.1f} fps (score={:.1f})",
+         out.cap.to_string(), out.fps, ranked.front().score);
+    return out;
+}
+
+/**
+ * 上游 source 段拼装：v4l2src + caps + 可选 jpeg 解码。
+ * 返回的串以"... ! "结尾，外层继续拼下游 videoconvert/scale/rate。
+ */
+std::string build_source_segment(const Config& c) {
+    std::ostringstream os;
+    os << "v4l2src device=" << c.capture.device << " do-timestamp=true ! ";
+
+    auto chosen = choose_input(c);
+    if (chosen.ok) {
+        os << PipelineBuilder::make_input_caps(chosen.cap, chosen.fps) << " ! ";
+        if (chosen.cap.media_type == "image/jpeg") {
+            // jpegparse 容错性比 jpegdec 直接吃要好（处理偶发坏帧）
+            os << "jpegparse ! jpegdec ! ";
+        }
+    } else {
+        // 兜底：完全按用户配置硬拼，与改造前一致；启动失败时 GStreamer 会自己报错
+        LOGW("falling back to hard-coded caps (legacy behavior): "
+             "format={} {}x{}@{}",
+             c.capture.pixfmt, c.capture.width, c.capture.height, c.capture.framerate);
+        os << "video/x-raw,format=" << c.capture.pixfmt
+           << ",width="     << c.capture.width
+           << ",height="    << c.capture.height
+           << ",framerate=" << c.capture.framerate << "/1 ! ";
+    }
+    return os.str();
+}
+
+} // namespace
+
+// ============================================================================
+// build()
+// ============================================================================
+
 std::string PipelineBuilder::build(const Config& c) {
     std::string src_fmt;
     std::string enc       = encoder_str(c.encoder, src_fmt);
@@ -124,23 +259,25 @@ std::string PipelineBuilder::build(const Config& c) {
 
     std::ostringstream os;
 
-    /* ── 采集 + 可选 GL 滤镜段，输出汇入 tee ── */
-    os << "( v4l2src device=" << c.capture.device << " do-timestamp=true"
+    /* ── 上游：v4l2src + 探测得到的 caps + 解码（如需） ── */
+    os << "( " << build_source_segment(c);
+
+    /* ── 下游统一 caps：把任意上游格式收敛成 cfg.capture.pixfmt + 期望分辨率/帧率 ──
+     * videoscale / videorate 加上是为了应对 ranker 选到的尺寸/帧率 ≠ 期望值的情况
+     * （能力清单里没有 1280x720@30 时会退而求其次选邻居，这里再缩放/重采样回标准） */
+    os << "videoconvert ! videoscale ! videorate"
        << " ! video/x-raw,format=" << c.capture.pixfmt
        << ",width="     << c.capture.width
        << ",height="    << c.capture.height
-       << ",framerate=" << c.capture.framerate << "/1"
-       << " ! videoconvert ! videoconvert";
+       << ",framerate=" << c.capture.framerate << "/1";
 
-    // GL 滤镜段：仅当 filter.enabled 为 true 才插入。
-    // 元素名 f0 是内部约定（rtsp_server 会按名查找并 g_object_set fragment + uniforms），
-    // 对外只暴露 yaml 中的 filter.enabled / filter.shader / filter.filter_type / filter.max_type。
+    /* ── 可选 GL 滤镜段 ── */
+    os << " ! videoconvert";
     if (c.filter.enabled) {
         os << " ! glupload ! glcolorconvert"
            << " ! glshader name=f0"
            << " ! glcolorconvert ! gldownload";
     }
-
     os << " ! videoconvert ! tee name=t";
 
     /* ── 分流副线 ── */

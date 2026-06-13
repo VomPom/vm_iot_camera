@@ -17,12 +17,26 @@ struct ServerConfig {
     std::string mount = "/live";
 };
 
+/*
+ * 摄像头采集配置。
+ *
+ * 字段语义（自 Stage 3 起重新解释）：
+ *   - width / height / framerate：用户「期望」参数，用于在启动期与设备
+ *     真实能力做评分匹配（V4L2Prober + CapsRanker）；不再要求设备必须
+ *     精确支持这套参数。
+ *   - pixfmt：编码器输入的统一格式（下游 caps），与上游探测解耦。
+ *     上游 caps 由 ranker 选出（可能是 image/jpeg / YUY2 / NV12 等），
+ *     之后必有 jpegdec? + videoconvert + videoscale + videorate 收敛到该 pixfmt。
+ *   - prefer_jpeg：true 时 ranker 优先选 MJPG（USB 摄像头常用，码流小）；
+ *     false 时优先选 raw（未来 zero-copy GPU 上传场景）。
+ */
 struct CaptureConfig {
     std::string device = "/dev/video0";
     int width = 1280;
     int height = 720;
     int framerate = 30;
-    std::string pixfmt = "NV12";
+    std::string pixfmt = "I420";
+    bool prefer_jpeg = true;
 };
 
 struct EncoderConfig {

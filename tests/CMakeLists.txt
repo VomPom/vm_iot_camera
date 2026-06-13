@@ -8,18 +8,29 @@
 # 主程序的 main.cpp 不能放进来，否则会和 gtest_main 冲突。
 set(VM_IOT_TEST_SRCS
         ${CMAKE_SOURCE_DIR}/src/app/config.cpp
+        ${CMAKE_SOURCE_DIR}/src/util/v4l2_prober.cpp
+        ${CMAKE_SOURCE_DIR}/src/util/caps_ranker.cpp
+        ${CMAKE_SOURCE_DIR}/src/pipeline/pipeline_builder.cpp
 )
+
+# pipeline_builder.cpp 包含 <gst/gst.h>，需要 GStreamer 的 include / link。
+# 用 pkg-config 已在主 CMakeLists 引入，这里复用同一份变量。
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GST_TEST REQUIRED IMPORTED_TARGET gstreamer-1.0)
 
 # 共享的 include 目录与外部依赖
 set(VM_IOT_TEST_INCLUDES
         ${CMAKE_SOURCE_DIR}/src/app
         ${CMAKE_SOURCE_DIR}/src/common
+        ${CMAKE_SOURCE_DIR}/src/pipeline
         ${CMAKE_SOURCE_DIR}/src/rtsp
+        ${CMAKE_SOURCE_DIR}/src/util
 )
 
 set(VM_IOT_TEST_LIBS
         yaml-cpp
         spdlog::spdlog
+        PkgConfig::GST_TEST
         GTest::gtest_main
 )
 

@@ -39,6 +39,7 @@ target_include_directories(vm_iot
         src/branches/snapshot
         src/control
         src/rtsp
+        src/util
 )
 
 
@@ -50,6 +51,18 @@ target_link_libraries(vm_iot PUBLIC
 # 故意不放进上面的 src-files glob：CLI 自带 main，与 daemon 互斥。
 add_executable(vm_iot_ctl
         ${CMAKE_SOURCE_DIR}/src/cli/iotcamctl.cpp)
+
+# ---- 调试工具 probe_dev ----
+# Linux 设备能力手动验证工具：跑 ./probe_dev /dev/video0 与
+# `v4l2-ctl --list-formats-ext` 输出对比。仅依赖 v4l2_prober + caps_ranker。
+add_executable(probe_dev
+        ${CMAKE_SOURCE_DIR}/tools/probe_dev.cpp
+        ${CMAKE_SOURCE_DIR}/src/util/v4l2_prober.cpp
+        ${CMAKE_SOURCE_DIR}/src/util/caps_ranker.cpp)
+target_include_directories(probe_dev PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/util
+        ${CMAKE_SOURCE_DIR}/src/common)
+target_link_libraries(probe_dev PRIVATE spdlog::spdlog)
 
 # ---- 安装规则（make install / cpack 时使用）----
 install(TARGETS vm_iot vm_iot_ctl RUNTIME DESTINATION bin)

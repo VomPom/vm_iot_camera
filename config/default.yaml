@@ -3,10 +3,15 @@ server:
   mount: /live
 capture:
   device: /dev/video0
+  # 以下三项是「期望参数」：启动期 V4L2Prober 探测设备真实能力后，
+  # CapsRanker 会选出最接近的 (fmt,w,h,fps) 组合作为上游 caps。
   width: 1280
   height: 720
   framerate: 30
-  pixfmt: I420 # I420 UYVY
+  # 下游统一格式：编码器输入的像素格式，pipeline 强制收敛到此格式。
+  # 与上游解耦——无论摄像头给的是 MJPG 还是 YUY2，下游都拿到同一份。
+  pixfmt: I420                         # I420 | YUY2 | NV12 ...
+  prefer_jpeg: true                    # true=优先选 MJPG（USB 摄像头主流），false=优先选 raw
 encoder:
   backend: x264          # x264 | openh264 | x265   （仅支持纯软编后端）
   bitrate_kbps: 4000
