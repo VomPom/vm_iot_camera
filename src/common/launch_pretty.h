@@ -93,6 +93,76 @@ inline bool _is_branch_anchor(const std::string& tok, std::string& tee_name) {
     return true;
 }
 
+/* 判断一个字符串片段是否形如 "<name>."（tee 锚点形式），
+ * <name> 仅包含字母数字和下划线，且必须以字母开头（避免误吞数字结尾元素）。 */
+inline bool _looks_like_anchor(const std::string& s) {
+    if (s.size() < 2) return false;
+    if (s.back() != '.') return false;
+    if (!std::isalpha(static_cast<unsigned char>(s.front()))) return false;
+    for (size_t i = 0; i + 1 < s.size(); ++i) {
+        char c = s[i];
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) return false;
+    }
+    return true;
+}
+
+/* 把首尾粘连的 "<name>." 锚点从 token 里拆出来，作为独立 token。
+ *
+ * 背景：
+ *   PipelineBuilder 产出的串里 tee 分支起点形如：
+ *       ... ! tee name=t t. ! queue ... ! pay0 t. ! queue ... ! sink
+ *   按 ' ! ' 切完后，会得到：
+ *       ["v4l2src ...", "... ! tee name=t t.",
+ *        "queue ... ! ... ! pay0 t.",
+ *        "queue ... ! ... ! sink"]
+ *   末尾的 " t." 粘在了上一个 token 尾巴上，导致后续无法识别成分支锚点。
+ *
+ * 处理：
+ *   遍历每个 token，
+ *     - Step A: 如果以 "<name>. " 开头（后面是空格），把锚点剥到独立 token；
+ *     - Step B: 如果以 " <name>." 结尾（前面是空格），把锚点剥到独立 token；
+ *   两步都用循环，能容忍极端的多次粘连，正常输入下各跑一次就收敛。
+ */
+inline std::vector<std::string> _detach_anchors(const std::vector<std::string>& in) {
+    std::vector<std::string> out;
+    out.reserve(in.size());
+    for (const auto& raw : in) {
+        std::string t = _trim(raw);
+
+        // Step A: 剥头部粘连的锚点
+        while (true) {
+            auto sp = t.find_first_of(" \t");
+            if (sp == std::string::npos) break;
+            std::string head = _trim(t.substr(0, sp));
+            if (!_looks_like_anchor(head)) break;
+            out.push_back(head);
+            t = _trim(t.substr(sp + 1));
+            if (t.empty()) break;
+        }
+        if (t.empty()) continue;
+
+        // Step B: 剥尾部粘连的锚点。注意尾部锚点逻辑上属于"下一段"的起点，
+        // 所以要先 push 当前 token 主体，再倒序 push 这些尾部锚点。
+        std::vector<std::string> trailing;
+        while (true) {
+            auto sp = t.find_last_of(" \t");
+            if (sp == std::string::npos) break;
+            std::string tail = _trim(t.substr(sp + 1));
+            if (!_looks_like_anchor(tail)) break;
+            trailing.push_back(tail);
+            t = _trim(t.substr(0, sp));
+            if (t.empty()) break;
+        }
+
+        if (!t.empty()) out.push_back(t);
+        // trailing 是从右往左剥下来的，原序应当还原成"最右边的最后追加"。
+        for (auto it = trailing.rbegin(); it != trailing.rend(); ++it) {
+            out.push_back(*it);
+        }
+    }
+    return out;
+}
+
 /* 从一个元素 token 里抓 name=xxx，返回空表示没有。
  * 仅用于副线启发式命名（snap_valve -> snapshot, rec_valve -> record ...）。 */
 inline std::string _extract_name(const std::string& tok) {
@@ -176,6 +246,9 @@ inline std::string render(const std::string& launch) {
 
     std::string body = _strip_outer_parens(launch);
     std::vector<std::string> toks = _split_by_bang(body);
+    // 关键：把 "tee name=t t." 这种尾部粘连 / 头部粘连的分支锚点拆成独立 token，
+    // 否则下面按 anchor 分段会错把整条流当成一根直链。
+    toks = _detach_anchors(toks);
 
     // 以 "<name>." 作为段边界，把 tokens 分组
     struct Segment {
