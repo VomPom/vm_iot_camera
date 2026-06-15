@@ -8,6 +8,7 @@
 #include "shader_filter.h"
 #include "rtsp_server.h"
 #include "snapshot.h"
+#include "record.h"
 #include "config.h"
 #include "log.h"
 
@@ -44,11 +45,13 @@ bool ControlChannel::start(const std::string& req_path,
                            const Config*      cfg,
                            const RtspServer*  server,
                            Snapshot*          snapshot,
+                           Record*            record,
                            std::chrono::steady_clock::time_point start_time) {
     filter_     = filter;
     cfg_        = cfg;
     server_     = server;
     snapshot_   = snapshot;
+    record_     = record;
     start_time_ = start_time;
 
     /* 1) 请求 FIFO（必须有 filter，否则 ShaderFilter 命令无意义；但不强求 server/cfg）。 */
@@ -165,6 +168,7 @@ void ControlChannel::stop() {
     cfg_    = nullptr;
     server_ = nullptr;
     snapshot_ = nullptr;
+    record_ = nullptr;
 }
 
 gboolean ControlChannel::on_readable(GIOChannel* src, GIOCondition cond, gpointer user) {
@@ -246,6 +250,10 @@ void ControlChannel::handle_line(const std::string& line) {
         reply = handle_status();
     } else if (cmd == "snapshot") {
         reply = handle_snapshot(toks);
+    } else if (cmd == "record") {
+        // TODO: 未来命令族扩展到1位数 (detect/motion 加入后)，
+        //       考虑用 map<string, handler> 替换这里的 if-else 链。
+        reply = handle_record(toks);
     } else {
         LOGW("control: unknown command '{}'", cmd);
         reply = make_err(line, "unknown_command");
@@ -374,6 +382,13 @@ std::string ControlChannel::handle_status() const {
            << "capture_pixfmt="       << cfg_->capture.pixfmt        << "\n";
     }
 
+    /* 5) 录像副线运行态（仅在 record_ 注入时附带）。 */
+    if (record_) {
+        std::string rec;
+        record_->format_status(rec);
+        os << rec;
+    }
+
     LOGI("control: status (uptime={}s, clients={})",
          secs, server_ ? server_->client_count() : -1);
     return make_ok("status", os.str());
@@ -408,4 +423,80 @@ std::string ControlChannel::handle_snapshot(const std::vector<std::string>& toks
 
     LOGI("control: snapshot -> {}", out_path);
     return make_ok(line, "path=" + out_path);
+}
+
+std::string ControlChannel::handle_record(const std::vector<std::string>& toks)
+{
+    /* 还原命令行用于 reply 回显。 */
+    std::string line;
+    for (size_t i = 0; i < toks.size(); ++i) {
+        if (i) line += ' ';
+        line += toks[i];
+    }
+
+    if (!record_) {
+        LOGW("control: record but module not attached");
+        return make_err(line, "record_disabled");
+    }
+    if (toks.size() < 2) {
+        LOGW("control: 'record' missing subcommand");
+        return make_err(line, "missing_argument");
+    }
+
+    const std::string& sub = toks[1];
+
+    if (sub == "start") {
+        std::string err;
+        bool ok = record_->start(err);
+        if (!ok) {
+            LOGW("control: record start failed: {}", err);
+            return make_err(line, err.empty() ? "unknown" : err);
+        }
+        LOGI("control: record start");
+        return make_ok(line, "recording=true");
+    }
+
+    if (sub == "stop") {
+        std::string err;
+        bool ok = record_->stop_recording(err);
+        if (!ok) {
+            LOGW("control: record stop failed: {}", err);
+            return make_err(line, err.empty() ? "unknown" : err);
+        }
+        LOGI("control: record stop");
+        return make_ok(line, "recording=false");
+    }
+
+    if (sub == "auto") {
+        if (toks.size() < 3) {
+            LOGW("control: 'record auto' missing duration");
+            return make_err(line, "missing_value");
+        }
+        int dur = 0;
+        try {
+            dur = std::stoi(toks[2]);
+        } catch (...) {
+            LOGW("control: invalid record auto duration '{}'", toks[2]);
+            return make_err(line, "invalid_value");
+        }
+        std::string err;
+        bool ok = record_->auto_record(dur, err);
+        if (!ok) {
+            LOGW("control: record auto failed: {}", err);
+            return make_err(line, err.empty() ? "unknown" : err);
+        }
+        LOGI("control: record auto {}s", dur);
+        return make_ok(line,
+                       "recording=true\nduration_sec=" + std::to_string(dur));
+    }
+
+    if (sub == "status") {
+        std::string body;
+        record_->format_status(body);
+        LOGI("control: record status");
+        return make_ok(line, body);
+    }
+
+    LOGW("control: unknown record subcommand '{}'", sub);
+    return make_err(line, "unknown_subcommand");
 }

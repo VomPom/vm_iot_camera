@@ -92,7 +92,16 @@ std::string PipelineBuilder::make_input_caps(const v4l2_prober::Capability& cap,
 
 /* ─────────────────────────── 管道架构总览 ───────────────────────────
  *
- *   build() 输出一条供 gst-rtsp-server 解析的 launch 字符串，整体结构如下：
+ *   build() 输出一条供 gst-rtsp-server 解析的 launch 字符串。
+ *
+ *   ★ 取流锚点（tee）命名约定 ★
+ *     - tee name=t      → 原始 raw（cfg.capture.pixfmt 已收敛），
+ *                         任何需要"像素"的副线从这里拉（snapshot / detect / motion ...）。
+ *     - tee name=enc_t  → 编码后 H.264/H.265 elementary stream，
+ *                         任何需要"码流"的副线从这里拉（main rtp / record ...）。
+ *     新增副线必须二选一锚点，禁止再起其他 tee。
+ *
+ *   整体结构：
  *
  *      v4l2src
  *         │ (上游 caps 由 V4L2Prober + CapsRanker 决定，jpeg 或 raw 二选一)
@@ -106,48 +115,66 @@ std::string PipelineBuilder::make_input_caps(const v4l2_prober::Capability& cap,
  *      videoconvert  ──►  [可选 GL 滤镜段]  ──►  videoconvert
  *                                                       │
  *                                                       ▼
- *                                                 tee  name=t
- *                                             ┌────────┴────────┐
- *                                             │                 │
- *                                     ┌───────┘                 └──────────┐
- *                                     ▼                                    ▼
- *                              (主线 main)                          (副线 snapshot)
- *                            推流：编码 + RTP 打包                  截图：JPEG 单帧落盘
- *                                     │                                    │
- *                                     ▼                                    ▼
- *                  encoder ─► parse ─► rtph26Xpay (name=pay0)    valve ─► jpegenc ─► multifilesink
- *                                                                (name=snap_valve / snap_sink)
+ *                                                 tee  name=t  ◄── raw 锚点
+ *                              ┌───────────────────┬────┴────┐
+ *                              │                   │         │
+ *                       (副线 snapshot)     (主线编码段)  (规划：detect / motion / ai)
+ *                              │                   │
+ *                              ▼                   ▼
+ *                      jpeg 截图            videoconvert ! encoder ! parse
+ *                                                   │
+ *                                                   ▼
+ *                                            tee  name=enc_t  ◄── 码流锚点
+ *                                         ┌─────────┴─────────┐
+ *                                         │                   │
+ *                                  (主线 rtp pay)      (副线 record)
+ *                                         │                   │
+ *                                         ▼                   ▼
+ *                                  rtph26Xpay name=pay0   valve ! splitmuxsink
+ *                                                          (rec_valve / rec_sink)
+ *
+ *   副线清单：
+ *     ┌────────────┬──────────┬──────────────┬────────┬────────────────────────┐
+ *     │ 副线        │ 锚点     │ 落点          │ 状态   │ queue 策略              │
+ *     ├────────────┼──────────┼──────────────┼────────┼────────────────────────┤
+ *     │ main(rtp)  │ enc_t.   │ rtph26Xpay   │ 已实现  │ leaky=downstream(2)     │
+ *     │ snapshot   │ t.       │ jpegenc/file │ 已实现  │ leaky=downstream(2)     │
+ *     │ record     │ enc_t.   │ splitmuxsink │ 已实现  │ no-leaky 大缓冲（不丢帧）│
+ *     │ detect     │ t.       │ appsink      │ 规划中  │ leaky=downstream(2)     │
+ *     │ motion     │ t.       │ msg/event    │ 规划中  │ leaky=downstream(2)     │
+ *     └────────────┴──────────┴──────────────┴────────┴────────────────────────┘
  *
  *   分流原则（添加新副线时遵循）：
- *     1) 所有副线统一从 tee  name=t  拉取，零拷贝、不影响主线。
- *     2) 每条副线开头必须有 `queue leaky=downstream max-size-buffers=2`。
- *     3) 每条副线首端放一个 `valve drop=true` 默认关闭，按需打开。
- *     4) 副线内的元素命名遵循 `<branch>_<role>`（如 snap_valve / snap_sink）。
+ *     1) 二选一锚点：要像素去 t.，要码流去 enc_t.；不再起新 tee。
+ *     2) 副线开头必须有 queue：snapshot/detect 类用 leaky=downstream（可丢），
+ *        record 类用 no-leaky 大缓冲（落盘不能丢帧）。
+ *     3) 副线首端放一个 `valve drop=true` 默认关闭，按需打开。
+ *     4) 副线内的元素命名遵循 `<branch>_<role>`（snap_valve / rec_sink / det_appsink）。
  *     5) build() 内部按副线拆分成 append_branch_<x>() 函数。
- *
- *   现有副线清单：
- *     - snapshot：JPEG 截图
- *   规划副线：
- *     - record  ：分段 MP4 录像  (mp4mux ! filesink，valve 控制起停)
- *     - ai      ：appsink 喂 C++ 推理（人脸/物体检测）
- *     - motion  ：videoanalyse / motioncells，事件走 bus message
  *
  * ──────────────────────────────────────────────────────────────────── */
 
-/* 主线（必有）：tee. ! queue ! convert ! 编码 ! parse ! rtp pay
+/* 主线编码段（公共上游 → tee name=enc_t）：把编码 + parse 提到 tee 之前，
+ * 这样 record 副线可以零成本复用同一份 H.264/H.265 ES。
  * pay0 是 gst-rtsp-server 约定名，必须保留。 */
-static void append_branch_main(std::ostringstream& os,
-                               const std::string&  src_fmt,
-                               const std::string&  enc_str,
-                               bool                is_h265) {
+static void append_main_encode_segment(std::ostringstream& os,
+                                       const std::string&  src_fmt,
+                                       const std::string&  enc_str,
+                                       bool                is_h265) {
     const char* parser = is_h265 ? "h265parse"  : "h264parse";
-    const char* payer  = is_h265 ? "rtph265pay" : "rtph264pay";
 
     os << " t. ! queue max-size-buffers=2 leaky=downstream"
        << " ! videoconvert ! video/x-raw,format=" << src_fmt
        << " ! " << enc_str
        << " ! " << parser << " config-interval=1"
-       << " ! " << payer  << " name=pay0 pt=96 mtu=1400";
+       << " ! tee name=enc_t";
+}
+
+/* 主线 RTP 出口副线：从 enc_t. 拉 ES，打成 RTP。 */
+static void append_branch_main_rtp(std::ostringstream& os, bool is_h265) {
+    const char* payer  = is_h265 ? "rtph265pay" : "rtph264pay";
+    os << " enc_t. ! queue max-size-buffers=2 leaky=downstream"
+       << " ! " << payer << " name=pay0 pt=96 mtu=1400";
 }
 
 /**
@@ -163,6 +190,38 @@ static void append_branch_snapshot(std::ostringstream& os) {
        << " ! multifilesink name=snap_sink"
        <<       " location=/tmp/vm_iot_snap_unused.jpg"
        <<       " post-messages=true async=false sync=false";
+}
+
+/**
+ * 录像副线：从 enc_t. 拉 H.264/H.265 ES，经 valve 控制起停，
+ * 进入 splitmuxsink 按时间切片为 mp4。
+ *
+ *   enc_t. ! queue(no-leaky 大缓冲) ! valve(默认关) ! splitmuxsink
+ *
+ * 关键参数说明：
+ *   - queue：录像不能丢帧，用 no-leaky + 大 buffer（2 秒），吃住盘 IO 抖动。
+ *   - valve：name=rec_valve，由 Record 模块控制开/关（auto 模式下还会受定时驱动）。
+ *   - splitmuxsink：
+ *       muxer-factory=mp4mux   容器固定 mp4，对 H.264/H.265 通吃。
+ *       max-size-time          段时长（ns），由 cfg.record.segment_sec 决定。
+ *       send-keyframe-requests=true  保险：定期向上游请求关键帧，让切点对齐 GOP。
+ *       async-finalize=true    切片时另开线程 mux，避免阻塞主流。
+ *   - location 由 Record 模块运行期写入（含目录和 strftime 模板）。
+ *   - "%05d" 是 splitmuxsink 自填的段号占位符，必须出现在 location 字符串里。
+ */
+static void append_branch_record(std::ostringstream& os, int segment_sec) {
+    /* 启动期 location 用占位（由 Record 模块在配置阶段重写为实际路径）。
+     * 这里给一个无害的占位避免 splitmuxsink 在没人配置时崩。 */
+    const long long seg_ns = static_cast<long long>(segment_sec) * 1000000000LL;
+    os << " enc_t. ! queue name=rec_queue max-size-buffers=0 max-size-bytes=0"
+       <<                  " max-size-time=2000000000"     // 2s 缓冲（不丢帧）
+       << " ! valve name=rec_valve drop=true"
+       << " ! splitmuxsink name=rec_sink"
+       <<       " muxer-factory=mp4mux"
+       <<       " max-size-time=" << seg_ns
+       <<       " send-keyframe-requests=true"
+       <<       " async-finalize=true"
+       <<       " location=/tmp/vm_iot_rec_unused_%05d.mp4";
 }
 
 // ============================================================================
@@ -184,7 +243,7 @@ struct ChosenInput {
 ChosenInput choose_input(const Config& c) {
     auto caps = v4l2_prober::probe(c.capture.device);
     if (caps.empty()) {
-        LOGW("v4l2 probe returned empty for device={} (non-Linux or device unavailable)",
+        LOGE("v4l2 probe returned empty for device={} (non-Linux or device unavailable)",
              c.capture.device);
         return {};
     }
@@ -281,8 +340,17 @@ std::string PipelineBuilder::build(const Config& c) {
     os << " ! videoconvert ! tee name=t";
 
     /* ── 分流副线 ── */
-    append_branch_main(os, src_fmt, enc, is_h265);
+    /* 1) snapshot：从 raw tee 拉，jpeg 落盘（与编码段并行，零编码成本）。 */
     append_branch_snapshot(os);
+
+    /* 2) 主线编码段：raw tee → encode → parse → tee name=enc_t（编码后的码流锚点）。 */
+    append_main_encode_segment(os, src_fmt, enc, is_h265);
+
+    /* 3) 主线 RTP：从 enc_t 拉 ES，打 RTP 给 gst-rtsp-server。 */
+    append_branch_main_rtp(os, is_h265);
+
+    /* 4) record：从 enc_t 拉 ES，valve+splitmuxsink 切片落盘。 */
+    append_branch_record(os, c.record.segment_sec);
 
     os << " )";
     return os.str();

@@ -10,17 +10,23 @@
 #define VM_IOT_RTSP_SERVER_H
 
 #include <gst/rtsp-server/rtsp-server.h>
+#include <vector>
 #include "pipeline_builder.h"
 
 struct Config;
 class ShaderFilter;
-class Snapshot;
+class BranchBase;
 
 class RtspServer {
 public:
-    /* filter / snapshot 可为 nullptr：分别表示 pipeline 不带 GL 滤镜段 / 不启用截图副线。
-     * 两者必须在 RtspServer 生命周期内保持存活，本类不拥有它们。 */
-    bool start(const Config& cfg, ShaderFilter* filter, Snapshot* snapshot);
+    /* filter 可为 nullptr：表示 pipeline 不带 GL 滤镜段。
+     * branches 列表里的每个对象在 media-configure 时会被依次 attach；
+     * 它们与 filter 一样必须在 RtspServer 生命周期内保持存活，本类不拥有。
+     * 通过基类 BranchBase 多态分发，未来新增 detect / cloud_upload 等副线
+     * 只需 push 到该列表，无需修改 RtspServer。 */
+    bool start(const Config& cfg,
+               ShaderFilter* filter,
+               std::vector<BranchBase*> branches);
     void stop();
 
     /* 当前 RTSP 客户端连接数（线程安全：内部走 gst_rtsp_server_client_filter）。
@@ -53,8 +59,8 @@ private:
     GstRTSPMediaFactory* factory_ = nullptr;
     guint                source_id_ = 0;
 
-    ShaderFilter*        filter_   = nullptr;   // 不拥有，仅持指针
-    Snapshot*            snapshot_ = nullptr;   // 不拥有，仅持指针
+    ShaderFilter*            filter_   = nullptr;   // 不拥有，仅持指针
+    std::vector<BranchBase*> branches_;             // 不拥有，仅持指针
 };
 
 #endif //VM_IOT_RTSP_SERVER_H

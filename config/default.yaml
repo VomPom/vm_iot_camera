@@ -29,5 +29,17 @@ snapshot:
   dir: /tmp/vm_iot/snapshots          # 默认输出目录；snapshot 命令未带 path 时使用
   quality: 90                         # JPEG 质量（预留，当前 jpegenc 未启用）
   timeout_ms: 1500                    # 单次截图等待 buffer 落盘超时
+record:
+  enabled: false                      # 启动期是否自动开启录像；false=只挂副线，valve 关闭，等待 record start
+  dir: /tmp/vm_iot/records            # 切片输出目录（自动创建）
+  segment_sec: 60                     # 每段 mp4 时长（秒）；splitmuxsink 在关键帧处切片
+  filename_pattern: "%Y%m%d_%H%M%S.mp4"  # strftime 模板（本项目自己 strftime、不走 splitmuxsink 内部）；段号 _%05d 由信号回调拼在扩展名之前
+# 规划中（暂未实现）：低分辨率检测副线，从 raw tee=t 拉，独立分辨率/帧率
+# detect:
+#   enabled: false
+#   width: 320
+#   height: 240
+#   framerate: 5
+#   appsink_max_buffers: 2
 log:
   level: info             # trace|debug|info|warn|err

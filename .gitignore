@@ -73,3 +73,5 @@ desktop.ini
 *.tmp
 *.orig
 *.rej
+docs/flow
+docs/task

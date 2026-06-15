@@ -23,6 +23,9 @@
 //     - 不去碰 gst-rtsp-server 内部 pipeline 的 bus，避免
 //       'timeout == 0 || bus->priv->poll != NULL' 断言。
 //
+//   生命周期框架（attach/unprepared/shutdown/ready）由 BranchBase 兜底，
+//   本类只填三件事：要抓哪些元素、抓到后做什么、卸载前停什么。
+//
 
 
 #ifndef VM_IOT_SNAPSHOT_H
@@ -34,22 +37,17 @@
 #include <condition_variable>
 #include <mutex>
 #include <string>
+#include <vector>
 
-class Snapshot {
+#include "branch_base.h"
+
+class Snapshot : public BranchBase {
 public:
     /* 配置默认输出目录、JPEG 质量、单次截图等待超时（毫秒）。
      * dir 为空时，take() 必须显式传入完整路径。 */
     void configure(const std::string& dir,
                    int                quality_unused = 90,
                    int                timeout_ms     = 1500);
-
-    /* media-configure 时调用，按 name 抓取 valve / sink 元素。
-     * 同一个 RtspServer 可能有多个 media 实例（client_filter shared=true 时只会 1 个），
-     * 这里简单只持有最近一次 attach 上来的那一份。media unprepared 时清空。 */
-    void attach_to_media(GstRTSPMedia* media);
-
-    /* 析构清理。 */
-    void shutdown();
 
     /* 同步触发一次截图。
      * @param out_path  in/out：传空则由模块按时间戳生成路径写到 dir/，
@@ -58,28 +56,24 @@ public:
      * 返回 true=成功；false=err 已填。 */
     bool take(std::string& out_path, std::string& err) const;
 
-    bool ready() const;
+protected:
+    /* ── BranchBase 钩子 ── */
+    const char* branch_name() const override { return "snapshot"; }
+    std::vector<const char*> required_elements() const override {
+        return {"snap_valve", "snap_sink"};
+    }
+    bool on_attached_locked() override { return true; }   // 无一次性属性需要写
+    /* unprepared 时无定时器/线程需要停，留默认空实现。 */
 
 private:
-    /* media unprepared 信号：清空持有的 valve_/sink_/pipeline_。 */
-    static void on_media_unprepared(GstRTSPMedia* media, gpointer user);
-
     /* sink pad buffer probe：buffer 到达即视为该帧已写盘，唤醒等待者。 */
     static GstPadProbeReturn on_sink_buffer(GstPad* pad, GstPadProbeInfo* info, gpointer user);
 
     /* 生成 "<dir>/snap_YYYYMMDD_HHMMSS_mmm.jpg" 风格路径。 */
     std::string make_default_path() const;
 
-    /* 控制 valve drop 属性。 */
-    void set_valve_drop(bool drop);
-
     std::string dir_;
     int         timeout_ms_ = 1500;
-
-    mutable std::mutex mu_;
-    GstElement* pipeline_ = nullptr;   // ref 持有
-    GstElement* valve_    = nullptr;   // ref 持有
-    GstElement* sink_     = nullptr;   // ref 持有
 
     /* 单次截图同步原语（take() 内独占使用，take_mu_ 保证串行）。 */
     mutable std::mutex              take_mu_;

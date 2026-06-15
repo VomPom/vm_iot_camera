@@ -90,6 +90,18 @@ Config Config::from_file(const std::string& path) {
         }
     }
 
+    if (auto r = n["record"]) {
+        c.record.enabled          = r["enabled"         ].as<bool>       (c.record.enabled);
+        c.record.dir              = r["dir"             ].as<std::string>(c.record.dir);
+        c.record.segment_sec      = r["segment_sec"     ].as<int>        (c.record.segment_sec);
+        c.record.filename_pattern = r["filename_pattern"].as<std::string>(c.record.filename_pattern);
+
+        if (c.record.segment_sec <= 0) {
+            spdlog::warn("record.segment_sec={} invalid, reset to 60", c.record.segment_sec);
+            c.record.segment_sec = 60;
+        }
+    }
+
     return c;
 }
 
@@ -154,6 +166,11 @@ const std::unordered_map<std::string, Setter>& setters() {
         {"snapshot.dir",         [](Config& c, const std::string& v){ c.snapshot.dir         = v; }},
         {"snapshot.quality",     [](Config& c, const std::string& v){ c.snapshot.quality     = parse_int(v, "snapshot.quality"); }},
         {"snapshot.timeout_ms",  [](Config& c, const std::string& v){ c.snapshot.timeout_ms  = parse_int(v, "snapshot.timeout_ms"); }},
+
+        {"record.enabled",          [](Config& c, const std::string& v){ c.record.enabled          = parse_bool(v, "record.enabled"); }},
+        {"record.dir",              [](Config& c, const std::string& v){ c.record.dir              = v; }},
+        {"record.segment_sec",      [](Config& c, const std::string& v){ c.record.segment_sec      = parse_int(v, "record.segment_sec"); }},
+        {"record.filename_pattern", [](Config& c, const std::string& v){ c.record.filename_pattern = v; }},
     };
     return kMap;
 }

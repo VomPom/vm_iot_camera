@@ -106,6 +106,15 @@ struct Capability {
 std::vector<Capability> probe(const std::string& device);
 
 /**
+ * 快速检测设备是否存在且可访问（仅 open(O_RDWR) 验证，不做 ioctl 探测）。
+ * 用于启动期前置检查：设备没插/权限不够直接给人类可读错误，而非等 RTSP 客户端
+ * 连上来才看到一句模糊的 503。
+ *
+ * @return true=设备文件存在且可读写打开；false=不存在/无权限/非 Linux 平台。
+ */
+bool device_accessible(const std::string& device);
+
+/**
  * 把整张能力表格式化成多行文本，风格类似 `v4l2-ctl --list-formats-ext`。
  * 用于启动期日志，方便运维排错。
  */

@@ -36,7 +36,9 @@ target_include_directories(vm_iot
         src/common
         src/pipeline
         src/filter
+        src/branches
         src/branches/snapshot
+        src/branches/record
         src/control
         src/rtsp
         src/util

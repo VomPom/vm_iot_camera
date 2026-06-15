@@ -24,7 +24,7 @@
 #include "rtsp_server.h"
 #include "pipeline_builder.h"
 #include "shader_filter.h"
-#include "snapshot.h"
+#include "branch_base.h"
 #include "log.h"
 #include "config.h"
 #include "launch_pretty.h"
@@ -119,9 +119,10 @@ void RtspServer::on_media_configure(GstRTSPMediaFactory* /*factory*/,
         self->filter_->attach_to_media(media);
     }
 
-    /* 1.5) 交给 Snapshot 抓取 snap_valve / snap_sink。 */
-    if (self->snapshot_) {
-        self->snapshot_->attach_to_media(media);
+    /* 1.5) 顺序 attach 所有 branches（snapshot / record / 未来的 detect ...）。
+     *      每个 branch 自己的 attach 是幂等且失败安全的：抓不到元素只 warn 不影响主线。 */
+    for (auto* b : self->branches_) {
+        if (b) b->attach_to_media(media);
     }
 
     /* 2) 挂 bus watch：拿到 media 的内部 pipeline → 它的 bus → add_watch。
@@ -154,9 +155,11 @@ void RtspServer::on_media_unprepared(GstRTSPMedia* /*media*/, gpointer /*user*/)
     LOGI("media unprepared (released)");
 }
 
-bool RtspServer::start(const Config& cfg, ShaderFilter* filter, Snapshot* snapshot) {
+bool RtspServer::start(const Config& cfg,
+                       ShaderFilter* filter,
+                       std::vector<BranchBase*> branches) {
     filter_   = filter;
-    snapshot_ = snapshot;
+    branches_ = std::move(branches);
 
     server_ = gst_rtsp_server_new();
     if (!server_) {
@@ -212,7 +215,7 @@ void RtspServer::stop() {
         server_ = nullptr;
     }
     filter_   = nullptr;
-    snapshot_ = nullptr;
+    branches_.clear();
 }
 
 int RtspServer::client_count() const {

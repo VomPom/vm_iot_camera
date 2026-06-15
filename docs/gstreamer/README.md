@@ -16,18 +16,24 @@
                                   └─► glshader (name=f0)
                                       └─► glcolorconvert ─► gldownload
                                           └─► videoconvert
-                                              └─► tee  name=t
-                                                   ├──► [branch:main]
-                                                   │     queue ─► videoconvert
-                                                   │       └─► x264enc
-                                                   │           └─► h264parse
-                                                   │               └─► rtph264pay (pay0)
+                                              └─► tee  name=t        # raw 锚点
+                                                   ├──► [branch:snapshot]
+                                                   │     queue ─► valve(snap_valve)
+                                                   │       └─► videoconvert
+                                                   │           └─► jpegenc
+                                                   │               └─► multifilesink(snap_sink)
                                                    │
-                                                   └──► [branch:snapshot]
-                                                         queue ─► valve(snap_valve)
-                                                           └─► videoconvert
-                                                               └─► jpegenc
-                                                                   └─► multifilesink(snap_sink)
+                                                   └──► (主线编码段)
+                                                         queue ─► videoconvert ─► x264enc ─► h264parse
+                                                           └─► tee  name=enc_t   # 码流锚点
+                                                                ├──► [branch:main]
+                                                                │     queue ─► rtph264pay (pay0)
+                                                                │
+                                                                └──► [branch:record]
+                                                                      queue(no-leaky) ─► valve(rec_valve)
+                                                                        └─► splitmuxsink(rec_sink)
+                                                                              muxer-factory=mp4mux
+                                                                              max-size-time=N s
 ```
 
 ## 分类目录
@@ -63,6 +69,7 @@
 ### 7. Payloader / Sink（封装与落盘）
 - [rtph264pay](./rtph264pay.md) —— H.264 → RTP 打包（RFC 6184）
 - [multifilesink](./multifilesink.md) —— 多文件序列输出
+- [splitmuxsink](./splitmuxsink.md) —— 容器边界自动切片（项目录像副线核心，mp4 分段录制）
 
 ## 阅读建议
 

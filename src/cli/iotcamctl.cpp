@@ -64,6 +64,10 @@ void print_help() {
         "  reload            reload shader file from disk\n"
         "  status            print runtime status (uptime, clients, encoder...)\n"
         "  snapshot [PATH]   capture one JPEG frame; PATH optional (daemon picks if empty)\n"
+        "  record start      start segmented mp4 recording\n"
+        "  record stop       stop recording\n"
+        "  record auto SECS  record for SECS seconds then stop automatically\n"
+        "  record status     print recording status (segments kept, total size...)\n"
         "  raw \"<line>\"      send a raw protocol line (advanced)\n"
         "\n"
         "GLOBAL OPTIONS:\n"
@@ -201,6 +205,31 @@ std::string build_request(const std::vector<std::string>& pos) {
             return "snapshot " + pos[1];
         }
         std::fprintf(stderr, "iotcamctl: 'snapshot' takes at most one PATH argument\n");
+        std::exit(2);
+    }
+    if (cmd == "record") {
+        if (pos.size() < 2) {
+            std::fprintf(stderr,
+                         "iotcamctl: 'record' requires a subcommand (start | stop | auto SECS | status)\n");
+            std::exit(2);
+        }
+        const std::string& sub = pos[1];
+        if (sub == "start" || sub == "stop" || sub == "status") {
+            if (pos.size() != 2) {
+                std::fprintf(stderr, "iotcamctl: 'record %s' takes no extra argument\n",
+                             sub.c_str());
+                std::exit(2);
+            }
+            return "record " + sub;
+        }
+        if (sub == "auto") {
+            if (pos.size() != 3) {
+                std::fprintf(stderr, "iotcamctl: 'record auto' requires SECS\n");
+                std::exit(2);
+            }
+            return "record auto " + pos[2];
+        }
+        std::fprintf(stderr, "iotcamctl: unknown record subcommand '%s'\n", sub.c_str());
         std::exit(2);
     }
     if (cmd == "raw") {

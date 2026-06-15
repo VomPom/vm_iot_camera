@@ -60,7 +60,12 @@
 //     filter <N>                   兼容写法，等价于 filter set <N>
 //     filter get                   打印当前 type
 //     reload                       重新读取 shader 文件并重新注入
-//     status                       打印运行状态（uptime / 客户端数 / 编码 / 滤镜等）
+//     status                       打印运行状态（uptime / 客户端数 / 编码 / 滤镜 / 录像等）
+//     snapshot [PATH]              抓一张 jpeg 落盘
+//     record start                 开启录像（valve 开闸；持续直到 record stop）
+//     record stop                  关闭录像
+//     record auto <SECS>           录 SECS 秒后自动停（GLib timeout 触发）
+//     record status                打印录像状态（attached / recording / 段数 / 总大小）
 //   非法命令记 warning，不会让进程崩溃。
 //
 // ─────────────────────────── 回执协议 ───────────────────────────
@@ -89,13 +94,14 @@
 class ShaderFilter;
 class RtspServer;
 class Snapshot;
+class Record;
 struct Config;
 
 class ControlChannel {
 public:
     /* 启动控制通道。
      *   req_path / reply_path 为空串时分别表示"不开请求 FIFO"/"不写回执"。
-     *   filter / cfg / server / snapshot 必须在 ControlChannel 生命周期内保持存活。
+     *   filter / cfg / server / snapshot / record 必须在 ControlChannel 生命周期内保持存活。
      *   start_time 用于 status 命令计算 uptime；通常传 main 启动时记录的 steady_clock::now()。
      * 失败返回 false（mkfifo / open 错误）；成功后 source 已挂到默认 GMainContext。 */
     bool start(const std::string& req_path,
@@ -104,6 +110,7 @@ public:
                const Config*      cfg,
                const RtspServer*  server,
                Snapshot*          snapshot,
+               Record*            record,
                std::chrono::steady_clock::time_point start_time);
     void stop();
 
@@ -126,6 +133,7 @@ private:
     std::string handle_reload();
     std::string handle_status() const;
     std::string handle_snapshot(const std::vector<std::string>& toks) const;
+    std::string handle_record(const std::vector<std::string>& toks);
 
     /* 工具：构造 "ok <line>\n<body>.\n" / "err <line> <reason>\n.\n"。 */
     static std::string make_ok(const std::string& cmd_line, const std::string& body);
@@ -137,6 +145,7 @@ private:
     const Config* cfg_     = nullptr;
     const RtspServer* server_ = nullptr;
     Snapshot*     snapshot_ = nullptr;
+    Record*       record_   = nullptr;
     std::chrono::steady_clock::time_point start_time_{};
 
     GIOChannel*   channel_ = nullptr;

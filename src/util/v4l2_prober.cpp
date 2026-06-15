@@ -258,11 +258,23 @@ std::vector<Capability> probe(const std::string& device) {
     return caps;
 }
 
+bool device_accessible(const std::string& device) {
+    int fd = ::open(device.c_str(), O_RDWR | O_NONBLOCK);
+    if (fd < 0) return false;
+    ::close(fd);
+    return true;
+}
+
 #else // 非 Linux 平台
 
 std::vector<Capability> probe(const std::string& device) {
     LOGW("v4l2_prober: probe('{}') is only supported on Linux, returning empty", device);
     return {};
+}
+
+bool device_accessible(const std::string& /*device*/) {
+    // 非 Linux 平台无 V4L2 设备可检测，返回 true 让调用方跳过检查而非误报。
+    return true;
 }
 
 #endif
