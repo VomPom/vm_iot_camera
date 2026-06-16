@@ -90,17 +90,8 @@ Config Config::from_file(const std::string& path) {
         }
     }
 
-    if (auto r = n["record"]) {
-        c.record.enabled          = r["enabled"         ].as<bool>       (c.record.enabled);
-        c.record.dir              = r["dir"             ].as<std::string>(c.record.dir);
-        c.record.segment_sec      = r["segment_sec"     ].as<int>        (c.record.segment_sec);
-        c.record.filename_pattern = r["filename_pattern"].as<std::string>(c.record.filename_pattern);
-
-        if (c.record.segment_sec <= 0) {
-            spdlog::warn("record.segment_sec={} invalid, reset to 60", c.record.segment_sec);
-            c.record.segment_sec = 60;
-        }
-    }
+    // TODO(record): 录像功能暂未实现，YAML 中的 record 节点会被静默忽略。
+    //               未来恢复时在此重新读取 record.enabled / dir / segment_sec / filename_pattern。
 
     return c;
 }
@@ -167,10 +158,8 @@ const std::unordered_map<std::string, Setter>& setters() {
         {"snapshot.quality",     [](Config& c, const std::string& v){ c.snapshot.quality     = parse_int(v, "snapshot.quality"); }},
         {"snapshot.timeout_ms",  [](Config& c, const std::string& v){ c.snapshot.timeout_ms  = parse_int(v, "snapshot.timeout_ms"); }},
 
-        {"record.enabled",          [](Config& c, const std::string& v){ c.record.enabled          = parse_bool(v, "record.enabled"); }},
-        {"record.dir",              [](Config& c, const std::string& v){ c.record.dir              = v; }},
-        {"record.segment_sec",      [](Config& c, const std::string& v){ c.record.segment_sec      = parse_int(v, "record.segment_sec"); }},
-        {"record.filename_pattern", [](Config& c, const std::string& v){ c.record.filename_pattern = v; }},
+        // TODO(record): 录像功能暂未实现，原 record.enabled / dir / segment_sec / filename_pattern
+        //               setter 已从表中移除。未来重新接入时请同时恢复本表与 from_file 中的解析。
     };
     return kMap;
 }

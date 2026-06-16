@@ -4,7 +4,7 @@
 #include "shader_filter.h"
 #include "branch_base.h"
 #include "snapshot.h"
-#include "record.h"
+// TODO(record): 录像副线暂未实现，未来重开时需重新 #include "record.h" 并在下方 attach。
 #include "control_channel.h"
 #include "log.h"
 #include "v4l2_prober.h"
@@ -86,17 +86,14 @@ int main(int argc, char** argv) {
 
     RtspServer server;
     Snapshot   snapshot;
-    Record     record;
     /* 截图副线与其他副线平级：独立于 RtspServer，只需 RtspServer 在 media-configure
      * 时帮它 attach。输出目录 / 质量 / 超时都由 cfg.snapshot 供给。 */
     snapshot.configure(cfg.snapshot.dir, cfg.snapshot.quality, cfg.snapshot.timeout_ms);
-    /* 录像副线同样是独立模块：media-configure 时抢 valve/sink，按 cfg.enabled 决定开闸。 */
-    record.configure(cfg.record);
-
     /* 把所有 branch 实例统一成 BranchBase* 列表交给 RtspServer。
      * 顺序无强约束（每个 branch 抓自己的命名元素，互不干扰）；未来新增 detect / cloud_upload
-     * 之类副线时只需在此 push 一个新对象，RtspServer 不用改。 */
-    std::vector<BranchBase*> branches{&snapshot, &record};
+     * 之类副线时只需在此 push 一个新对象，RtspServer 不用改。
+     * TODO(record): 重开录像时在 branches 里加回 &record。 */
+    std::vector<BranchBase*> branches{&snapshot};
 
     if (!server.start(cfg, cfg.filter.enabled ? &filter : nullptr, branches))
     {
@@ -115,21 +112,19 @@ int main(int argc, char** argv) {
                &cfg,
                &server,
                &snapshot,
-               &record,
                start_time);
 
     g_main_loop_run(loop);             // 阻塞，SIGINT/SIGTERM 退出
 
     /* 退出顺序很关键：
      *   1) 先停 ControlChannel：避免 FIFO 命令在 shutdown 期间访问已释放对象。
-     *   2) 再停所有 branch：record 在 shutdown 时若仍在录，会向 rec_queue 注入
-     *      EOS 让 splitmuxsink 把当前段 finalize（写 moov box），并等
-     *      "splitmuxsink-fragment-closed" 消息（≤1.5s 超时）。此时 RTSP media/
-     *      pipeline 还活着，bus 与元素引用都未回收，EOS 才能正确传播。
+     *   2) 再停所有 branch。
+     *      TODO(record): 重开录像时要恢复 record.shutdown() 调用，并保证顺序在
+     *                   server.stop() 之前——这样 RTSP media/pipeline 还活着，mp4mux
+     *                   才能交付完 moov。
      *   3) 最后停 RtspServer / filter：释放 server 与共享资源。 */
     ctrl.stop();
     snapshot.shutdown();
-    record.shutdown();
     server.stop();
     filter.shutdown();
     g_main_loop_unref(loop);

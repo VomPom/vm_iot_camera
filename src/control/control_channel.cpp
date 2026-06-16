@@ -8,7 +8,7 @@
 #include "shader_filter.h"
 #include "rtsp_server.h"
 #include "snapshot.h"
-#include "record.h"
+// TODO(record): 录像功能暂未实现，未来恢复时重新 #include "record.h"
 #include "config.h"
 #include "log.h"
 
@@ -45,13 +45,12 @@ bool ControlChannel::start(const std::string& req_path,
                            const Config*      cfg,
                            const RtspServer*  server,
                            Snapshot*          snapshot,
-                           Record*            record,
+                           // TODO(record): 重开录像时这里恢复 Record* record 参数
                            std::chrono::steady_clock::time_point start_time) {
     filter_     = filter;
     cfg_        = cfg;
     server_     = server;
     snapshot_   = snapshot;
-    record_     = record;
     start_time_ = start_time;
 
     /* 1) 请求 FIFO（必须有 filter，否则 ShaderFilter 命令无意义；但不强求 server/cfg）。 */
@@ -168,7 +167,6 @@ void ControlChannel::stop() {
     cfg_    = nullptr;
     server_ = nullptr;
     snapshot_ = nullptr;
-    record_ = nullptr;
 }
 
 gboolean ControlChannel::on_readable(GIOChannel* src, GIOCondition cond, gpointer user) {
@@ -382,12 +380,10 @@ std::string ControlChannel::handle_status() const {
            << "capture_pixfmt="       << cfg_->capture.pixfmt        << "\n";
     }
 
-    /* 5) 录像副线运行态（仅在 record_ 注入时附带）。 */
-    if (record_) {
-        std::string rec;
-        record_->format_status(rec);
-        os << rec;
-    }
+    /* 5) 录像副线运行态。
+     * TODO(record): 当前未实现，仅输出占位。未来恢复后调 record_->format_status(rec)。 */
+    os << "record_enabled=false\n"
+          "record_status=not_implemented\n";
 
     LOGI("control: status (uptime={}s, clients={})",
          secs, server_ ? server_->client_count() : -1);
@@ -434,69 +430,10 @@ std::string ControlChannel::handle_record(const std::vector<std::string>& toks)
         line += toks[i];
     }
 
-    if (!record_) {
-        LOGW("control: record but module not attached");
-        return make_err(line, "record_disabled");
-    }
-    if (toks.size() < 2) {
-        LOGW("control: 'record' missing subcommand");
-        return make_err(line, "missing_argument");
-    }
-
-    const std::string& sub = toks[1];
-
-    if (sub == "start") {
-        std::string err;
-        bool ok = record_->start(err);
-        if (!ok) {
-            LOGW("control: record start failed: {}", err);
-            return make_err(line, err.empty() ? "unknown" : err);
-        }
-        LOGI("control: record start");
-        return make_ok(line, "recording=true");
-    }
-
-    if (sub == "stop") {
-        std::string err;
-        bool ok = record_->stop_recording(err);
-        if (!ok) {
-            LOGW("control: record stop failed: {}", err);
-            return make_err(line, err.empty() ? "unknown" : err);
-        }
-        LOGI("control: record stop");
-        return make_ok(line, "recording=false");
-    }
-
-    if (sub == "auto") {
-        if (toks.size() < 3) {
-            LOGW("control: 'record auto' missing duration");
-            return make_err(line, "missing_value");
-        }
-        int dur = 0;
-        try {
-            dur = std::stoi(toks[2]);
-        } catch (...) {
-            LOGW("control: invalid record auto duration '{}'", toks[2]);
-            return make_err(line, "invalid_value");
-        }
-        std::string err;
-        bool ok = record_->auto_record(dur, err);
-        if (!ok) {
-            LOGW("control: record auto failed: {}", err);
-            return make_err(line, err.empty() ? "unknown" : err);
-        }
-        LOGI("control: record auto {}s", dur);
-        return make_ok(line,
-                       "recording=true\nduration_sec=" + std::to_string(dur));
-    }
-
-    if (sub == "status") {
-        std::string body;
-        record_->format_status(body);
-        LOGI("control: record status");
-        return make_ok(line, body);
-    }
-
-    LOGW("control: unknown record subcommand '{}'", sub);
-    return make_err(line, "unknown_subcommand");
+    /* TODO(record): 录像功能暂未实现。
+     *   保留命令入口与 CLI 约定不变（iotcamctl record start/stop/auto/status），
+     *   仅在守护进程侧统一返回 err record_not_implemented，避免调用方需要修改协议。
+     *   未来恢复实现时，重新接入 record_->start/stop_recording/auto_record/format_status 即可。 */
+    LOGW("control: record command '{}' rejected: feature not implemented yet (TODO)", line);
+    return make_err(line, "record_not_implemented");
 }

@@ -74,19 +74,9 @@ struct SnapshotConfig {
 
 /* 录像副线（record branch）配置。
  *
- * 设计要点：
- *   - 从主线编码后的 H.264/H.265 ES 二次分流，避免重新编码（CPU 极省）。
- *   - 落盘走 splitmuxsink，按 max-size-time 自动切片；切片落在 GOP 关键帧处。
- *   - 切片文件名形如 "%Y%m%d_%H%M%S.mp4"，由模块运行期写入 location 模板。
- *   - 默认关闭（valve drop=true），由 record start / record auto / config.enabled 触发。
- *   - 容器目前固定 mp4mux（H.264/H.265 都吃，落盘最广）。
- */
-struct RecordConfig {
-    bool        enabled        = false;                // 启动期是否自动开启录像（false=只挂副线，valve 关）
-    std::string dir            = "/tmp/vm_iot/records";// 切片输出目录
-    int         segment_sec    = 60;                   // 每段时长（秒），落到 splitmuxsink max-size-time
-    std::string filename_pattern = "%Y%m%d_%H%M%S.mp4";// strftime 模板；段号 (_%05d) 由 splitmuxsink "format-location" 信号回调里拼接，本串不会被 sprintf 处理
-};
+ * TODO(record): 录像功能暂未实现，原 RecordConfig 字段已从 Config 中移除。
+ *               未来重开时在这里重新声明 RecordConfig 与 Config::record 字段，
+ *               并在 config.cpp 里恢复 YAML 解析与 setter 表的 record.* 条目。 */
 
 struct Config {
     ServerConfig   server;
@@ -96,7 +86,7 @@ struct Config {
     FilterConfig   filter;
     ControlConfig  control;
     SnapshotConfig snapshot;
-    RecordConfig   record;
+    // TODO(record): 重开录像时恢复  RecordConfig record;
 
     std::string config_dir;
 

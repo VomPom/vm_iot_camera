@@ -127,19 +127,21 @@ std::string PipelineBuilder::make_input_caps(const v4l2_prober::Capability& cap,
  *                                            tee  name=enc_t  ◄── 码流锚点
  *                                         ┌─────────┴─────────┐
  *                                         │                   │
- *                                  (主线 rtp pay)      (副线 record)
+ *                                  (主线 rtp pay)      (副线 record，TODO)
  *                                         │                   │
  *                                         ▼                   ▼
- *                                  rtph26Xpay name=pay0   valve ! splitmuxsink
- *                                                          (rec_valve / rec_sink)
+ *                                  rtph26Xpay name=pay0   暂不追加任何元素
+ *                                                                  ↑
+ *                                                  录像功能暂未实现，未来在这里
+ *                                                  重新接 mp4mux+filesink 子 bin
  *
  *   副线清单：
  *     ┌────────────┬──────────┬──────────────┬────────┬────────────────────────┐
- *     │ 副线        │ 锚点     │ 落点          │ 状态   │ queue 策略              │
+ *     │ 副线        │ 锈点     │ 落点          │ 状态   │ queue 策略              │
  *     ├────────────┼──────────┼──────────────┼────────┼────────────────────────┤
  *     │ main(rtp)  │ enc_t.   │ rtph26Xpay   │ 已实现  │ leaky=downstream(2)     │
  *     │ snapshot   │ t.       │ jpegenc/file │ 已实现  │ leaky=downstream(2)     │
- *     │ record     │ enc_t.   │ splitmuxsink │ 已实现  │ no-leaky 大缓冲（不丢帧）│
+ *     │ record     │ enc_t.   │ mp4mux+file  │ TODO    │ 原计划 no-leaky 大缓冲     │
  *     │ detect     │ t.       │ appsink      │ 规划中  │ leaky=downstream(2)     │
  *     │ motion     │ t.       │ msg/event    │ 规划中  │ leaky=downstream(2)     │
  *     └────────────┴──────────┴──────────────┴────────┴────────────────────────┘
@@ -149,7 +151,7 @@ std::string PipelineBuilder::make_input_caps(const v4l2_prober::Capability& cap,
  *     2) 副线开头必须有 queue：snapshot/detect 类用 leaky=downstream（可丢），
  *        record 类用 no-leaky 大缓冲（落盘不能丢帧）。
  *     3) 副线首端放一个 `valve drop=true` 默认关闭，按需打开。
- *     4) 副线内的元素命名遵循 `<branch>_<role>`（snap_valve / rec_sink / det_appsink）。
+ *     4) 副线内的元素命名遵循 `<branch>_<role>`（snap_valve / rec_tail / det_appsink）。
  *     5) build() 内部按副线拆分成 append_branch_<x>() 函数。
  *
  * ──────────────────────────────────────────────────────────────────── */
@@ -192,36 +194,9 @@ static void append_branch_snapshot(std::ostringstream& os) {
        <<       " post-messages=true async=false sync=false";
 }
 
-/**
- * 录像副线：从 enc_t. 拉 H.264/H.265 ES，经 valve 控制起停，
- * 进入 splitmuxsink 按时间切片为 mp4。
- *
- *   enc_t. ! queue(no-leaky 大缓冲) ! valve(默认关) ! splitmuxsink
- *
- * 关键参数说明：
- *   - queue：录像不能丢帧，用 no-leaky + 大 buffer（2 秒），吃住盘 IO 抖动。
- *   - valve：name=rec_valve，由 Record 模块控制开/关（auto 模式下还会受定时驱动）。
- *   - splitmuxsink：
- *       muxer-factory=mp4mux   容器固定 mp4，对 H.264/H.265 通吃。
- *       max-size-time          段时长（ns），由 cfg.record.segment_sec 决定。
- *       send-keyframe-requests=true  保险：定期向上游请求关键帧，让切点对齐 GOP。
- *       async-finalize=true    切片时另开线程 mux，避免阻塞主流。
- *   - location 由 Record 模块运行期写入（含目录和 strftime 模板）。
- *   - "%05d" 是 splitmuxsink 自填的段号占位符，必须出现在 location 字符串里。
- */
-static void append_branch_record(std::ostringstream& os, int segment_sec) {
-    /* 启动期 location 用占位（由 Record 模块在配置阶段重写为实际路径）。
-     * 这里给一个无害的占位避免 splitmuxsink 在没人配置时崩。 */
-    const long long seg_ns = static_cast<long long>(segment_sec) * 1000000000LL;
-    os << " enc_t. ! queue name=rec_queue max-size-buffers=0 max-size-bytes=0"
-       <<                  " max-size-time=2000000000"     // 2s 缓冲（不丢帧）
-       << " ! valve name=rec_valve drop=true"
-       << " ! splitmuxsink name=rec_sink"
-       <<       " muxer-factory=mp4mux"
-       <<       " max-size-time=" << seg_ns
-       <<       " send-keyframe-requests=true"
-       <<       " async-finalize=true"
-       <<       " location=/tmp/vm_iot_rec_unused_%05d.mp4";
+static void append_branch_record(std::ostringstream& /*os*/) {
+    // 暂不在 launch 中追加任何录像副线元素；主线 RTSP 推流不受影响。
+    // 保留函数名与调用点作为未来恢复的坐标。
 }
 
 // ============================================================================
@@ -349,8 +324,8 @@ std::string PipelineBuilder::build(const Config& c) {
     /* 3) 主线 RTP：从 enc_t 拉 ES，打 RTP 给 gst-rtsp-server。 */
     append_branch_main_rtp(os, is_h265);
 
-    /* 4) record：从 enc_t 拉 ES，valve+splitmuxsink 切片落盘。 */
-    append_branch_record(os, c.record.segment_sec);
+    /* 4) record（TODO）：录像副线暂未实现，调用保留作为未来恢复的锈点。 */
+    append_branch_record(os);
 
     os << " )";
     return os.str();

@@ -31,9 +31,12 @@
                                                                 │
                                                                 └──► [branch:record]
                                                                       queue(no-leaky) ─► valve(rec_valve)
-                                                                        └─► splitmuxsink(rec_sink)
-                                                                              muxer-factory=mp4mux
-                                                                              max-size-time=N s
+                                                                        └─► identity(rec_tail)        # 稳定锚点
+                                                                              ┊
+                                                                  [Record 模块运行期动态 link]
+                                                                              ┊
+                                                                              ▼
+                                                                        mp4mux ─► filesink           # 每段一个独立子 bin
 ```
 
 ## 分类目录
@@ -57,19 +60,26 @@
 - [glshader](./glshader.md) —— 自定义片元着色器滤镜
 - [gldownload](./gldownload.md) —— GL 纹理 → 系统内存回读
 
-### 5. Generic（流控 / 分流 / 缓冲）
+### 5. Generic（流控 / 分流 / 缓冲 / 占位）
 - [tee](./tee.md) —— 单输入多分支零拷贝复制
 - [queue](./queue.md) —— 缓冲与解耦线程边界
 - [valve](./valve.md) —— 数据闸阀（按需开闭）
+- [identity](./identity.md) —— 透传占位元素（项目录像副线锚点 `rec_tail`）
 
 ### 6. Encoder（编码器）
 - [x264enc](./x264enc.md) —— H.264 软编（libx264）
 - [jpegenc](./jpegenc.md) —— 单帧 JPEG 软编
 
-### 7. Payloader / Sink（封装与落盘）
+### 7. Payloader / Muxer / Sink（封装与落盘）
 - [rtph264pay](./rtph264pay.md) —— H.264 → RTP 打包（RFC 6184）
 - [multifilesink](./multifilesink.md) —— 多文件序列输出
-- [splitmuxsink](./splitmuxsink.md) —— 容器边界自动切片（项目录像副线核心，mp4 分段录制）
+- [mp4mux](./mp4mux.md) —— ISO BMFF / mp4 容器封装（项目录像副线核心，每段一个独立实例）
+- [filesink](./filesink.md) —— 单文件落盘（与 mp4mux 配对每段一个）
+
+### 附：已不在主线使用
+- [splitmuxsink](./splitmuxsink.md) —— 容器边界自动切片。早期录像副线方案，
+  因 split-now 语义"切完旧段立刻开新段"无法优雅 stop，已替换为
+  `identity 锚点 + 动态 mp4mux+filesink 子 bin`（业内方案 1）。文档保留作为历史参考。
 
 ## 阅读建议
 
