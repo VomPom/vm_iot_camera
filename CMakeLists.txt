@@ -10,6 +10,8 @@ add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GST REQUIRED IMPORTED_TARGET
         gstreamer-1.0
+        gstreamer-base-1.0
+        gstreamer-video-1.0
         gstreamer-rtsp-1.0
         gstreamer-rtsp-server-1.0)
 
@@ -41,6 +43,7 @@ target_include_directories(vm_iot
         src/control
         src/rtsp
         src/util
+        src/plugins/pagfilter
 )
 
 

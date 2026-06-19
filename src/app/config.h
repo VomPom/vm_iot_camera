@@ -50,11 +50,30 @@ struct LogConfig {
     std::string level = "info";
 };
 
+/* PAG 滤镜（自研 GStreamer 元素 pagfilter）的配置。
+ *
+ * Stage 1：enabled=true 时仅在 pipeline 中插入一个 passthrough 元素，不修改像素。
+ * Stage 2：增加 invert 字段——直接映射到 pagfilter 的 GObject 属性 "invert"。
+ *           false：行为等同 Stage 1（passthrough 短路，零开销）；
+ *           true ：对每帧 I420 三个 plane 做 c = 255 - c 的逐像素反相，作为
+ *                  「证明 transform_ip 链路可用」的最小像素特效。
+ * file 字段是为后续 Stage 4/5 预留的素材路径占位，Stage 2 不读取。
+ * 默认 enabled=false，确保现网行为不变。 */
+struct PagFilterConfig {
+    bool        enabled = false;                     // 总开关；false 时不在 pipeline 插入 pagfilter
+    bool        invert  = false;                     // Stage 2：true 时启用颜色反相（c = 255 - c）
+    std::string file;                                // .pag 素材路径；相对路径以 config_dir/.. 为基目录
+};
+
 struct FilterConfig {
     bool        enabled     = true;
     std::string shader      = "effects.frag";        // 单一 shader 文件；运行时通过 uniform filter_type 切换分支
     int         filter_type = 0;                     // 启动默认特效：0=passthrough 1=mosaic 2=invert ...
     int         max_type    = 2;                     // filter next/prev 循环上限（含），与 shader 内 if 分支保持一致
+
+    /* PAG 自研滤镜段，独立于上面的 GL shader 段：
+     * 二者可以同时启用，pagfilter 会插在 GL 段之后、第一个 tee 之前。 */
+    PagFilterConfig pag;
 };
 
 /* 控制通道（命令 FIFO）独立于 filter，承载所有运行时指令：
@@ -72,11 +91,7 @@ struct SnapshotConfig {
     int         timeout_ms = 1500;                    // 等待 buffer 落盘超时
 };
 
-/* 录像副线（record branch）配置。
- *
- * TODO(record): 录像功能暂未实现，原 RecordConfig 字段已从 Config 中移除。
- *               未来重开时在这里重新声明 RecordConfig 与 Config::record 字段，
- *               并在 config.cpp 里恢复 YAML 解析与 setter 表的 record.* 条目。 */
+/* 录像副线（record branch）配置。*/
 
 struct Config {
     ServerConfig   server;

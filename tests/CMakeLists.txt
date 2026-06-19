@@ -11,12 +11,20 @@ set(VM_IOT_TEST_SRCS
         ${CMAKE_SOURCE_DIR}/src/util/v4l2_prober.cpp
         ${CMAKE_SOURCE_DIR}/src/util/caps_ranker.cpp
         ${CMAKE_SOURCE_DIR}/src/pipeline/pipeline_builder.cpp
+        ${CMAKE_SOURCE_DIR}/src/plugins/pagfilter/gstpagfilter.cpp
 )
 
 # pipeline_builder.cpp 包含 <gst/gst.h>，需要 GStreamer 的 include / link。
+# pagfilter 另外依赖 gstreamer-base / gstreamer-video（GstBaseTransform / GstVideoInfo）。
+# Stage 2 的 test_pagfilter 使用 appsrc/appsink 做像素反相白盒验证，
+# 因此再加 gstreamer-app-1.0。
 # 用 pkg-config 已在主 CMakeLists 引入，这里复用同一份变量。
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(GST_TEST REQUIRED IMPORTED_TARGET gstreamer-1.0)
+pkg_check_modules(GST_TEST REQUIRED IMPORTED_TARGET
+        gstreamer-1.0
+        gstreamer-base-1.0
+        gstreamer-video-1.0
+        gstreamer-app-1.0)
 
 # 共享的 include 目录与外部依赖
 set(VM_IOT_TEST_INCLUDES
@@ -25,6 +33,7 @@ set(VM_IOT_TEST_INCLUDES
         ${CMAKE_SOURCE_DIR}/src/pipeline
         ${CMAKE_SOURCE_DIR}/src/rtsp
         ${CMAKE_SOURCE_DIR}/src/util
+        ${CMAKE_SOURCE_DIR}/src/plugins/pagfilter
 )
 
 set(VM_IOT_TEST_LIBS

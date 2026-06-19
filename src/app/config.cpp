@@ -68,6 +68,16 @@ Config Config::from_file(const std::string& path) {
                          c.filter.filter_type, c.filter.max_type);
             c.filter.filter_type = 0;
         }
+
+        /* filter.pag.*：Stage 2 读 enabled / invert / file。
+         * file 为空且 enabled=true 允许（Stage 1/2 不读文件）。
+         * invert 与 enabled 独立生效：enabled=true && invert=false
+         * 时 pagfilter 仍为默认 passthrough，行为等同 Stage 1。 */
+        if (auto p = f["pag"]) {
+            c.filter.pag.enabled = p["enabled"].as<bool>(c.filter.pag.enabled);
+            c.filter.pag.invert  = p["invert" ].as<bool>(c.filter.pag.invert);
+            c.filter.pag.file    = p["file"   ].as<std::string>(c.filter.pag.file);
+        }
     }
 
     if (auto ctl = n["control"]) {
@@ -150,6 +160,10 @@ const std::unordered_map<std::string, Setter>& setters() {
         {"filter.shader",        [](Config& c, const std::string& v){ c.filter.shader        = v; }},
         {"filter.filter_type",   [](Config& c, const std::string& v){ c.filter.filter_type   = parse_int(v, "filter.filter_type"); }},
         {"filter.max_type",      [](Config& c, const std::string& v){ c.filter.max_type      = parse_int(v, "filter.max_type"); }},
+
+        {"filter.pag.enabled",   [](Config& c, const std::string& v){ c.filter.pag.enabled   = parse_bool(v, "filter.pag.enabled"); }},
+        {"filter.pag.invert",    [](Config& c, const std::string& v){ c.filter.pag.invert    = parse_bool(v, "filter.pag.invert"); }},
+        {"filter.pag.file",      [](Config& c, const std::string& v){ c.filter.pag.file      = v; }},
 
         {"control.request_fifo", [](Config& c, const std::string& v){ c.control.request_fifo = v; }},
         {"control.reply_fifo",   [](Config& c, const std::string& v){ c.control.reply_fifo   = v; }},

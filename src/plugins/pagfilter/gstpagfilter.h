@@ -1,0 +1,70 @@
+ //
+// Created by vompom on 2026/06/18.
+//
+// @Description
+//   pagfilter：vm_iot 自研 GStreamer 滤镜元素。
+//
+//   Stage 2：开始累积运行时状态。所有字段必须是 C POD —— GObject 派生
+//   实例结构不能放 ctor/dtor，构造由 gst_pagfilter_init 显式完成、
+//   释放由（未来的）finalize 回调显式完成。
+//
+
+#ifndef VM_IOT_GSTPAGFILTER_H
+#define VM_IOT_GSTPAGFILTER_H
+
+#pragma once
+
+#include <gst/gst.h>
+#include <gst/base/gstbasetransform.h>
+#include <gst/video/video.h>
+
+G_BEGIN_DECLS
+
+#define GST_TYPE_PAGFILTER            (gst_pagfilter_get_type())
+#define GST_PAGFILTER(obj)            (G_TYPE_CHECK_INSTANCE_CAST((obj), GST_TYPE_PAGFILTER, GstPagFilter))
+#define GST_PAGFILTER_CLASS(klass)    (G_TYPE_CHECK_CLASS_CAST((klass), GST_TYPE_PAGFILTER, GstPagFilterClass))
+#define GST_IS_PAGFILTER(obj)         (G_TYPE_CHECK_INSTANCE_TYPE((obj), GST_TYPE_PAGFILTER))
+#define GST_IS_PAGFILTER_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE((klass), GST_TYPE_PAGFILTER))
+
+typedef struct _GstPagFilter      GstPagFilter;
+typedef struct _GstPagFilterClass GstPagFilterClass;
+
+struct _GstPagFilter {
+    GstBaseTransform parent;
+
+    /* Stage 2 起开始累积运行时状态。所有字段必须是 C POD —— GObject 派生
+     * 实例结构不能放 ctor/dtor，构造由 gst_pagfilter_init 显式完成、
+     * 释放由（未来的）finalize 回调显式完成。 */
+
+    /* invert：Stage 2 GObject 属性。读写都走 g_atomic_int_*，
+     * 因为 streaming 线程会读、控制线程（gst-launch / 未来 ControlChannel）会写。
+     * 用 gint 而不是 gboolean 是为了直接用 g_atomic_int_get/set。 */
+    gint invert_atomic;
+
+    /* in_info：set_caps 阶段缓存的 GstVideoInfo，transform_ip 直接用它取
+     * stride / plane offset / width / height，避免每帧重新 parse caps。
+     * 仅 streaming 线程访问（set_caps 与 transform_ip 串行），无需加锁。 */
+    GstVideoInfo in_info;
+    gboolean     info_valid;
+};
+
+struct _GstPagFilterClass {
+    GstBaseTransformClass parent_class;
+};
+
+GType gst_pagfilter_get_type(void);
+
+G_END_DECLS
+
+/* ──────────────────────── 项目内调用接口 ────────────────────────
+ * pagfilter_register_static：
+ *   把 "pagfilter" 元素注册到默认 plugin registry，rank = GST_RANK_NONE。
+ *   必须在 gst_init() 之后、build pipeline 之前调用一次。
+ *   重复调用安全：内部走 GStreamer registry 的"已存在则跳过"语义。
+ *
+ * 返回 true 表示注册成功（或本次进程已注册过）；false 仅在底层 GLib
+ * 类型系统异常时出现，调用方应当作启动期硬错误对待。
+ */
+bool pagfilter_register_static();
+
+#endif //VM_IOT_GSTPAGFILTER_H

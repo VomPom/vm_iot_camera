@@ -4,10 +4,10 @@
 #include "shader_filter.h"
 #include "branch_base.h"
 #include "snapshot.h"
-// TODO(record): 录像副线暂未实现，未来重开时需重新 #include "record.h" 并在下方 attach。
 #include "control_channel.h"
 #include "log.h"
 #include "v4l2_prober.h"
+#include "gstpagfilter.h"
 #include <gst/gst.h>
 #include <getopt.h>
 #include <chrono>
@@ -29,6 +29,14 @@ static std::string extract_config_path(int argc, char** argv) {
 int main(int argc, char** argv) {
     gst_init(&argc, &argv);
 
+    /* 静态注册项目自研 GStreamer 元素（目前仅 pagfilter）。
+     * 顺序上必须在 gst_init 之后、build pipeline 之前调用。
+     * pagfilter 未注册时，launch 中出现 "pagfilter" 会被当作未知元素报错。 */
+    if (!pagfilter_register_static()) {
+        std::fprintf(stderr, "pagfilter: static plugin register failed\n");
+        return 4;
+    }
+
     /* 启动时间用于 status 命令计算 uptime；steady_clock 不受系统时间调整影响。 */
     auto start_time = std::chrono::steady_clock::now();
 
@@ -45,6 +53,8 @@ int main(int argc, char** argv) {
     LOGI("iotcam starting, encoder={}, device={}, {}x{}@{}",
          cfg.encoder.backend, cfg.capture.device,
          cfg.capture.width, cfg.capture.height, cfg.capture.framerate);
+    LOGI("pagfilter: enabled={} invert={} file='{}' (stage2)",
+         cfg.filter.pag.enabled, cfg.filter.pag.invert, cfg.filter.pag.file);
 
     /* 启动前快速验证摄像头设备是否存在且可访问。
      * 如果设备没插 / 权限不够，这里直接返回人类可读错误并退出， */
@@ -92,7 +102,7 @@ int main(int argc, char** argv) {
     /* 把所有 branch 实例统一成 BranchBase* 列表交给 RtspServer。
      * 顺序无强约束（每个 branch 抓自己的命名元素，互不干扰）；未来新增 detect / cloud_upload
      * 之类副线时只需在此 push 一个新对象，RtspServer 不用改。
-     * TODO(record): 重开录像时在 branches 里加回 &record。 */
+     */
     std::vector<BranchBase*> branches{&snapshot};
 
     if (!server.start(cfg, cfg.filter.enabled ? &filter : nullptr, branches))
@@ -119,9 +129,6 @@ int main(int argc, char** argv) {
     /* 退出顺序很关键：
      *   1) 先停 ControlChannel：避免 FIFO 命令在 shutdown 期间访问已释放对象。
      *   2) 再停所有 branch。
-     *      TODO(record): 重开录像时要恢复 record.shutdown() 调用，并保证顺序在
-     *                   server.stop() 之前——这样 RTSP media/pipeline 还活着，mp4mux
-     *                   才能交付完 moov。
      *   3) 最后停 RtspServer / filter：释放 server 与共享资源。 */
     ctrl.stop();
     snapshot.shutdown();

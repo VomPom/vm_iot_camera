@@ -12,19 +12,32 @@ capture:
   # 与上游解耦——无论摄像头给的是 MJPG 还是 YUY2，下游都拿到同一份。
   pixfmt: I420                         # I420 | YUY2 | NV12 ...
   prefer_jpeg: true                    # true=优先选 MJPG（USB 摄像头主流），false=优先选 raw
+
 encoder:
   backend: x264          # x264 | openh264 | x265   （仅支持纯软编后端）
   bitrate_kbps: 4000
   gop: 30
   bframes: 0             # 仅 x264 生效；openh264 / x265 忽略此项
+
 filter:
   enabled: true                       # 总开关：false 时 pipeline 不插入 GL 滤镜段
   shader: effects.frag                # 单一着色器文件；相对路径以 config/../shaders 为基目录
   filter_type: 0                      # 启动默认特效：0=passthrough 1=mosaic 2=invert
   max_type: 2                         # filter next 循环上限（含），与 shader 内 if 分支保持一致
+  # PAG 自研滤镜段（自定义 GstElement: pagfilter）
+  # Stage 1：enabled=true 时仅插入一个 passthrough 元素，不修改任何像素。
+  # Stage 2：新增 invert——映射到 pagfilter 的 GObject 属性 "invert"，
+  #         true 时对每帧 I420 做颜色反相 (c = 255 - c)，作为最小像素特效演示。
+  # 后续 Stage 才会真正渲染 PAG。
+  pag:
+    enabled: true                    # 总开关；默认关，主分支随时可发布
+    invert: true                    # Stage 2：true 启用颜色反相
+    file: "PAG_LOGO.pag"             # 预留：.pag 素材路径；Stage 2 暂不读取
+
 control:
   request_fifo: /tmp/vm_iot.ctl       # 命令请求 FIFO；空串=不开启控制通道
   reply_fifo:   /tmp/vm_iot.reply     # 命令应答 FIFO；空串=不写回执
+
 snapshot:
   dir: /tmp/vm_iot/snapshots          # 默认输出目录；snapshot 命令未带 path 时使用
   quality: 90                         # JPEG 质量（预留，当前 jpegenc 未启用）
@@ -36,5 +49,6 @@ snapshot:
 #   height: 240
 #   framerate: 5
 #   appsink_max_buffers: 2
+
 log:
   level: info             # trace|debug|info|warn|err

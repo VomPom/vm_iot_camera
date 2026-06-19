@@ -14,9 +14,10 @@
                           └─► videoconvert
                               └─► glupload ─► glcolorconvert
                                   └─► glshader (name=f0)
-                                      └─► glcolorconvert ─► gldownload
-                                          └─► videoconvert
-                                              └─► tee  name=t        # raw 锚点
+                              └─► glcolorconvert ─► gldownload
+                                  └─► videoconvert
+        └─► [pagfilter]                # Stage 2：默认 passthrough；invert=true 时颜色反相，cfg.filter.pag.* 控制
+                                          └─► tee  name=t        # raw 锚点
                                                    ├──► [branch:snapshot]
                                                    │     queue ─► valve(snap_valve)
                                                    │       └─► videoconvert
@@ -65,6 +66,7 @@
 - [queue](./queue.md) —— 缓冲与解耦线程边界
 - [valve](./valve.md) —— 数据闸阀（按需开闭）
 - [identity](./identity.md) —— 透传占位元素（项目录像副线锚点 `rec_tail`）
+- [pagfilter](./pagfilter.md) —— 自研滤镜（Stage 2 可选颜色反相，规划接入 libpag）
 
 ### 6. Encoder（编码器）
 - [x264enc](./x264enc.md) —— H.264 软编（libx264）
