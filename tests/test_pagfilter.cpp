@@ -4,33 +4,29 @@
 // @Description
 //   pagfilter 元素的最小单元测试。
 //
-//   覆盖范围（Stage 2 起）：
+//   覆盖范围（Stage 3 收尾后）：
 //     - 静态注册：pagfilter_register_static() 多次调用幂等；
 //     - 元素工厂：gst_element_factory_make("pagfilter", ...) 能拿到实例；
 //     - Pad 模板：sink/src 都有 ALWAYS pad，caps 包含 video/x-raw + I420；
 //     - passthrough：实例化后 BaseTransform 默认 passthrough=TRUE
-//       （Stage 1 的核心承诺；Stage 2 仅在 invert=FALSE 时仍然成立）；
+//       （Stage 1 骨架的核心承诺，Stage 4 接入 PAG 渲染时才会切换）；
 //     - launch 串：videotestsrc ! pagfilter ! fakesink 能进 PAUSED 状态
 //       （macOS 下也可跑通，不依赖摄像头）；
-//     - GObject 属性 invert：默认 FALSE；set TRUE 后 passthrough 变 FALSE，
-//       set FALSE 后 passthrough 复位 TRUE；
-//     - 像素反相：手工灌一帧 I420 (Y=0x10, U=0x20, V=0x30) 通过
-//       appsrc → pagfilter(invert=true) → appsink，断言每个 plane
-//       都被映射成 0xEF / 0xDF / 0xCF（255 - c）。
+//     - pag_sdk stub 行为：单测构建强制 VM_IOT_ENABLE_LIBPAG=0
+//       （见 tests/CMakeLists.txt），固定 stub 契约。
+//
 //
 
 #include <gtest/gtest.h>
 
 #include <gst/gst.h>
-#include <gst/app/gstappsrc.h>
-#include <gst/app/gstappsink.h>
 #include <gst/base/gstbasetransform.h>
-#include <gst/video/video.h>
 
 #include <cstring>
 #include <vector>
 
 #include "gstpagfilter.h"
+#include "pag_sdk.h"
 
 namespace {
 
@@ -63,8 +59,9 @@ TEST_F(PagFilterTest, FactoryProducesElement) {
 }
 
 TEST_F(PagFilterTest, DefaultsToPassthrough) {
-    /* Stage 1 的核心承诺：实例化后立即 passthrough=TRUE，
-     * 等价于 identity，下游 buffer 与上游同地址。 */
+    /* Stage 1 骨架的核心承诺：实例化后立即 passthrough=TRUE，
+     * 等价于 identity，下游 buffer 与上游同地址。
+     * Stage 4 接入 PAG 渲染时此承诺会被打破，本用例届时需要同步调整。 */
     GstElement* el = gst_element_factory_make("pagfilter", nullptr);
     ASSERT_NE(el, nullptr);
     GstBaseTransform* trans = GST_BASE_TRANSFORM(el);
@@ -86,7 +83,8 @@ TEST_F(PagFilterTest, PadTemplatesAdvertiseI420) {
         if (st->direction == GST_PAD_SINK) ++sink_cnt;
         if (st->direction == GST_PAD_SRC)  ++src_cnt;
         EXPECT_EQ(st->presence, GST_PAD_ALWAYS);
-        if (st->static_caps.string && std::string(st->static_caps.string).find("I420") != std::string::npos) {
+        if (st->static_caps.string &&
+            std::string(st->static_caps.string).find("I420") != std::string::npos) {
             i420_seen = true;
         }
     }
@@ -127,116 +125,21 @@ TEST_F(PagFilterTest, LaunchPipelineReachesPaused) {
     gst_object_unref(pipe);
 }
 
-/* Stage 2：invert 属性默认值与 setter 触发 passthrough 切换。
- * 用 element 单实例做白盒验证，不构建完整 pipeline。 */
-TEST_F(PagFilterTest, InvertPropertyTogglesPassthrough) {
-    GstElement* el = gst_element_factory_make("pagfilter", nullptr);
-    ASSERT_NE(el, nullptr);
-    GstBaseTransform* trans = GST_BASE_TRANSFORM(el);
-
-    /* 默认值：invert=FALSE & passthrough=TRUE。 */
-    gboolean v = TRUE;
-    g_object_get(el, "invert", &v, nullptr);
-    EXPECT_FALSE(v);
-    EXPECT_TRUE(gst_base_transform_is_passthrough(trans));
-
-    /* set invert=TRUE → passthrough 应被切到 FALSE。 */
-    g_object_set(el, "invert", TRUE, nullptr);
-    g_object_get(el, "invert", &v, nullptr);
-    EXPECT_TRUE(v);
-    EXPECT_FALSE(gst_base_transform_is_passthrough(trans));
-
-    /* set invert=FALSE → passthrough 复位 TRUE，行为等价 Stage 1。 */
-    g_object_set(el, "invert", FALSE, nullptr);
-    g_object_get(el, "invert", &v, nullptr);
-    EXPECT_FALSE(v);
-    EXPECT_TRUE(gst_base_transform_is_passthrough(trans));
-
-    gst_object_unref(el);
-}
-
-/* Stage 2：颜色反相像素级验证。
- *   构造一帧 4x4 I420 全 plane 同色 (Y=0x10, U=0x20, V=0x30)，
- *   走 appsrc → pagfilter(invert=true) → appsink，
- *   读出 buffer 后断言每 plane 已变成 0xEF / 0xDF / 0xCF。
- *   选 4x4 是为了让 U/V plane 至少 2x2 仍可验证 stride 正确。 */
-TEST_F(PagFilterTest, InvertPipelineFlipsAllPlanes) {
-    constexpr int kW = 4;
-    constexpr int kH = 4;
-    /* I420 大小 = w*h (Y) + 2 * (w/2)*(h/2) (U+V) = w*h*3/2 */
-    constexpr gsize kSize = kW * kH * 3 / 2;
-
-    GError* err = nullptr;
-    GstElement* pipe = gst_parse_launch(
-        "appsrc name=src is-live=false format=time block=true "
-        "  caps=video/x-raw,format=I420,width=4,height=4,framerate=30/1 "
-        "! pagfilter name=pag0 invert=true "
-        "! appsink name=sink sync=false emit-signals=false",
-        &err);
-    ASSERT_NE(pipe, nullptr) << (err ? err->message : "(null)");
-    if (err) g_error_free(err);
-
-    GstElement* src  = gst_bin_get_by_name(GST_BIN(pipe), "src");
-    GstElement* sink = gst_bin_get_by_name(GST_BIN(pipe), "sink");
-    GstElement* pag  = gst_bin_get_by_name(GST_BIN(pipe), "pag0");
-    ASSERT_NE(src,  nullptr);
-    ASSERT_NE(sink, nullptr);
-    ASSERT_NE(pag,  nullptr);
-
-    /* invert=true 时 passthrough 应被切到 FALSE（防御性确认）。 */
-    EXPECT_FALSE(gst_base_transform_is_passthrough(GST_BASE_TRANSFORM(pag)));
-
-    ASSERT_NE(gst_element_set_state(pipe, GST_STATE_PLAYING),
-              GST_STATE_CHANGE_FAILURE);
-
-    /* 灌入一帧 (Y=0x10, U=0x20, V=0x30)。 */
-    GstBuffer* buf = gst_buffer_new_allocate(nullptr, kSize, nullptr);
-    ASSERT_NE(buf, nullptr);
-    {
-        GstMapInfo m;
-        ASSERT_TRUE(gst_buffer_map(buf, &m, GST_MAP_WRITE));
-        std::memset(m.data,                          0x10, kW * kH);                    // Y
-        std::memset(m.data + kW * kH,                0x20, (kW / 2) * (kH / 2));        // U
-        std::memset(m.data + kW * kH + (kW / 2) * (kH / 2),
-                    0x30, (kW / 2) * (kH / 2));                                          // V
-        gst_buffer_unmap(buf, &m);
-    }
-    GST_BUFFER_PTS(buf) = 0;
-    GST_BUFFER_DURATION(buf) = GST_SECOND / 30;
-
-    GstFlowReturn pushed = gst_app_src_push_buffer(GST_APP_SRC(src), buf); // 拥有权转移
-    ASSERT_EQ(pushed, GST_FLOW_OK);
-    gst_app_src_end_of_stream(GST_APP_SRC(src));
-
-    /* 拉一帧，2 秒超时足够。 */
-    GstSample* sample = gst_app_sink_try_pull_sample(GST_APP_SINK(sink),
-                                                     2 * GST_SECOND);
-    ASSERT_NE(sample, nullptr) << "appsink 未拉到样本（pagfilter 没透出？）";
-    GstBuffer* outbuf = gst_sample_get_buffer(sample);
-    ASSERT_NE(outbuf, nullptr);
-
-    GstMapInfo m;
-    ASSERT_TRUE(gst_buffer_map(outbuf, &m, GST_MAP_READ));
-    ASSERT_EQ(m.size, kSize);
-    /* 期望：每 plane 全部被映射到 255 - c。 */
-    for (gsize i = 0; i < static_cast<gsize>(kW * kH); ++i) {
-        ASSERT_EQ(m.data[i], 0xEFu) << "Y plane @" << i;
-    }
-    for (gsize i = 0; i < static_cast<gsize>((kW / 2) * (kH / 2)); ++i) {
-        ASSERT_EQ(m.data[kW * kH + i], 0xDFu) << "U plane @" << i;
-    }
-    for (gsize i = 0; i < static_cast<gsize>((kW / 2) * (kH / 2)); ++i) {
-        ASSERT_EQ(m.data[kW * kH + (kW / 2) * (kH / 2) + i], 0xCFu)
-            << "V plane @" << i;
-    }
-    gst_buffer_unmap(outbuf, &m);
-    gst_sample_unref(sample);
-
-    gst_element_set_state(pipe, GST_STATE_NULL);
-    gst_object_unref(src);
-    gst_object_unref(sink);
-    gst_object_unref(pag);
-    gst_object_unref(pipe);
+/* Stage 3：pag_sdk 抽象层 stub 分支验证。
+ * 单测构建强制 VM_IOT_ENABLE_LIBPAG=0（见 tests/CMakeLists.txt），
+ * 所以这里期望：
+ *   - is_enabled() 返回 false；
+ *   - sdk_version() 返回固定 "libpag(disabled)"；
+ *   - selftest_load() 不论传什么路径都返回 false 且不崩。
+ * 真集成分支（ON）的验证留给手工 / 集成测试；本用例锁定 stub 行为契约，
+ * 防止后续 refactor 把 stub 路径误打通。 */
+TEST_F(PagFilterTest, PagSdkStubBehavior) {
+    EXPECT_FALSE(pag_sdk::is_enabled());
+    EXPECT_EQ(pag_sdk::sdk_version(), std::string("libpag(disabled)"));
+    /* 三种入参都应平稳返回 false：空路径、明显不存在的路径、像合法的路径。 */
+    EXPECT_FALSE(pag_sdk::selftest_load(""));
+    EXPECT_FALSE(pag_sdk::selftest_load("/nonexistent/path/foo.pag"));
+    EXPECT_FALSE(pag_sdk::selftest_load("pag/PAG_LOGO.pag"));
 }
 
 } // namespace

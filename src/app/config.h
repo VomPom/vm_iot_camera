@@ -52,16 +52,17 @@ struct LogConfig {
 
 /* PAG 滤镜（自研 GStreamer 元素 pagfilter）的配置。
  *
- * Stage 1：enabled=true 时仅在 pipeline 中插入一个 passthrough 元素，不修改像素。
- * Stage 2：增加 invert 字段——直接映射到 pagfilter 的 GObject 属性 "invert"。
- *           false：行为等同 Stage 1（passthrough 短路，零开销）；
- *           true ：对每帧 I420 三个 plane 做 c = 255 - c 的逐像素反相，作为
- *                  「证明 transform_ip 链路可用」的最小像素特效。
- * file 字段是为后续 Stage 4/5 预留的素材路径占位，Stage 2 不读取。
+ * 当前形态：enabled=true 时仅在 pipeline 中插入一个 passthrough 元素，
+ *           不修改任何像素；selftest=true 时启动期一次性调用 libpag 加载
+ *           file 指向的 .pag 文件并打印元信息，证明 SDK 编译/链接通。
+ *           selftest 独立于 enabled，即使 enabled=false 也会执行，
+ *           便于在不影响 pipeline 的情况下单独验证 SDK。
+ *           Stage 4 起 pagfilter 才会真正渲染 .pag 到画面上。
+ *
  * 默认 enabled=false，确保现网行为不变。 */
 struct PagFilterConfig {
-    bool        enabled = false;                     // 总开关；false 时不在 pipeline 插入 pagfilter
-    bool        invert  = false;                     // Stage 2：true 时启用颜色反相（c = 255 - c）
+    bool        enabled  = false;                    // 总开关；false 时不在 pipeline 插入 pagfilter
+    bool        selftest = false;                    // true 时启动期尝试加载 file 并打印元信息
     std::string file;                                // .pag 素材路径；相对路径以 config_dir/.. 为基目录
 };
 

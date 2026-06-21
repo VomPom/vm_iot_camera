@@ -69,14 +69,16 @@ Config Config::from_file(const std::string& path) {
             c.filter.filter_type = 0;
         }
 
-        /* filter.pag.*：Stage 2 读 enabled / invert / file。
+    /* filter.pag.*：读 enabled / selftest / file。
          * file 为空且 enabled=true 允许（Stage 1/2 不读文件）。
          * invert 与 enabled 独立生效：enabled=true && invert=false
-         * 时 pagfilter 仍为默认 passthrough，行为等同 Stage 1。 */
-        if (auto p = f["pag"]) {
-            c.filter.pag.enabled = p["enabled"].as<bool>(c.filter.pag.enabled);
-            c.filter.pag.invert  = p["invert" ].as<bool>(c.filter.pag.invert);
-            c.filter.pag.file    = p["file"   ].as<std::string>(c.filter.pag.file);
+         * 时 pagfilter 仍为默认 passthrough，行为等同 Stage 1。
+         * selftest 与 enabled 也独立：用来在不修改 pipeline 的前提下
+         * 单独验证 libpag 链接是否通。 */
+    if (auto p = f["pag"]) {
+        c.filter.pag.enabled  = p["enabled" ].as<bool>(c.filter.pag.enabled);
+        c.filter.pag.selftest = p["selftest"].as<bool>(c.filter.pag.selftest);
+        c.filter.pag.file     = p["file"    ].as<std::string>(c.filter.pag.file);
         }
     }
 
@@ -162,7 +164,7 @@ const std::unordered_map<std::string, Setter>& setters() {
         {"filter.max_type",      [](Config& c, const std::string& v){ c.filter.max_type      = parse_int(v, "filter.max_type"); }},
 
         {"filter.pag.enabled",   [](Config& c, const std::string& v){ c.filter.pag.enabled   = parse_bool(v, "filter.pag.enabled"); }},
-        {"filter.pag.invert",    [](Config& c, const std::string& v){ c.filter.pag.invert    = parse_bool(v, "filter.pag.invert"); }},
+        {"filter.pag.selftest",  [](Config& c, const std::string& v){ c.filter.pag.selftest  = parse_bool(v, "filter.pag.selftest"); }},
         {"filter.pag.file",      [](Config& c, const std::string& v){ c.filter.pag.file      = v; }},
 
         {"control.request_fifo", [](Config& c, const std::string& v){ c.control.request_fifo = v; }},

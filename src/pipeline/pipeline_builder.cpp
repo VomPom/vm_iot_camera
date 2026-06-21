@@ -314,18 +314,14 @@ std::string PipelineBuilder::build(const Config& c) {
     }
     os << " ! videoconvert";
 
-    /* ── 可选 PAG 自研滤镜段（Stage 2：可选颜色反相） ──
+    /* ── 可选 PAG 自研滤镜段 ──
      * 位置：GL 段之后、tee 之前，作用在 raw I420 系统内存上，
      * 与 GL 段解耦——任一段单独 enable 都能跑通。
      * name=pag0 是约定名，便于未来从 ControlChannel 通过
      * gst_bin_get_by_name 拿到实例做热控。
-     * invert：直接以 GObject 属性形式写进 launch 串，
-     * 由 pagfilter 自身 set_property 处理 passthrough 切换。
-     * - invert=false（默认）：pagfilter 实例化即 passthrough，行为等价 Stage 1；
-     * - invert=true        ：取消 passthrough，每帧走 transform_ip 反相。 */
+     * 当前实现为 passthrough 骨架，Stage 4 起会真正渲染 .pag 到画面。 */
     if (c.filter.pag.enabled) {
-        os << " ! pagfilter name=pag0"
-           << " invert=" << (c.filter.pag.invert ? "true" : "false");
+        os << " ! pagfilter name=pag0";
     }
 
     os << " ! tee name=t";

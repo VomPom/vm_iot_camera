@@ -6,25 +6,24 @@
 #
 # 共享的被测源码集合（按需追加）。
 # 主程序的 main.cpp 不能放进来，否则会和 gtest_main 冲突。
+# pag_sdk.cpp 通过 VM_IOT_ENABLE_LIBPAG=0 走 stub 分支，无 libpag 外部依赖；
+# gstpagfilter.cpp 是 element 实现，test_pagfilter.cpp 直接调它的注册函数。
 set(VM_IOT_TEST_SRCS
         ${CMAKE_SOURCE_DIR}/src/app/config.cpp
         ${CMAKE_SOURCE_DIR}/src/util/v4l2_prober.cpp
         ${CMAKE_SOURCE_DIR}/src/util/caps_ranker.cpp
         ${CMAKE_SOURCE_DIR}/src/pipeline/pipeline_builder.cpp
         ${CMAKE_SOURCE_DIR}/src/plugins/pagfilter/gstpagfilter.cpp
+        ${CMAKE_SOURCE_DIR}/src/plugins/pagfilter/pag_sdk.cpp
 )
 
 # pipeline_builder.cpp 包含 <gst/gst.h>，需要 GStreamer 的 include / link。
-# pagfilter 另外依赖 gstreamer-base / gstreamer-video（GstBaseTransform / GstVideoInfo）。
-# Stage 2 的 test_pagfilter 使用 appsrc/appsink 做像素反相白盒验证，
-# 因此再加 gstreamer-app-1.0。
-# 用 pkg-config 已在主 CMakeLists 引入，这里复用同一份变量。
+# pagfilter 另外依赖 gstreamer-base（GstBaseTransform）；
+# Stage 1/3 单测目前不需要 gstreamer-app/video，未来如有 appsrc/appsink 用例再补。
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GST_TEST REQUIRED IMPORTED_TARGET
         gstreamer-1.0
-        gstreamer-base-1.0
-        gstreamer-video-1.0
-        gstreamer-app-1.0)
+        gstreamer-base-1.0)
 
 # 共享的 include 目录与外部依赖
 set(VM_IOT_TEST_INCLUDES
@@ -62,6 +61,10 @@ foreach (test_src IN LISTS VM_IOT_TEST_FILES)
 
     target_link_libraries(${test_name} PRIVATE
             ${VM_IOT_TEST_LIBS})
+
+    # 单测固定走 pag_sdk 的 stub 分支：CI 主机无需安装 libpag / freetype / EGL / GLES。
+    # 真集成分支（VM_IOT_ENABLE_LIBPAG=ON）由主可执行文件 vm_iot 独立验证。
+    target_compile_definitions(${test_name} PRIVATE VM_IOT_ENABLE_LIBPAG=0)
 
     # 自动发现并注册测试用例到 CTest
     gtest_discover_tests(${test_name})

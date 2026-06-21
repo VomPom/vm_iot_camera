@@ -75,3 +75,14 @@ desktop.ini
 *.rej
 docs/flow
 docs/task
+
+###############################################################################
+# third_party 预编译产物白名单
+# 上面的 *.a / *.so / *.so.* 通配会误伤 third_party/libpag/ 下手工放进来的
+# 预编译库（见 docs/libpag/build-from-source.md）。这里显式放开。
+# 仅放开 third_party/，不要放开仓库其他位置。
+###############################################################################
+!third_party/**/*.a
+!third_party/**/*.so
+!third_party/**/*.so.*
+!third_party/**/*.dylib

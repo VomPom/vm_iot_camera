@@ -1,12 +1,12 @@
- //
+//
 // Created by vompom on 2026/06/18.
 //
 // @Description
 //   pagfilter：vm_iot 自研 GStreamer 滤镜元素。
 //
-//   Stage 2：开始累积运行时状态。所有字段必须是 C POD —— GObject 派生
-//   实例结构不能放 ctor/dtor，构造由 gst_pagfilter_init 显式完成、
-//   释放由（未来的）finalize 回调显式完成。
+//   Stage 3 收尾：去掉 Stage 2 的 invert 像素特效与相关运行时状态，
+//   回归到 Stage 1 的极简骨架（do-nothing pass-through），
+//   为 Stage 4 接入 libpag 渲染留出干净起点。
 //
 
 #ifndef VM_IOT_GSTPAGFILTER_H
@@ -16,7 +16,6 @@
 
 #include <gst/gst.h>
 #include <gst/base/gstbasetransform.h>
-#include <gst/video/video.h>
 
 G_BEGIN_DECLS
 
@@ -31,21 +30,9 @@ typedef struct _GstPagFilterClass GstPagFilterClass;
 
 struct _GstPagFilter {
     GstBaseTransform parent;
-
-    /* Stage 2 起开始累积运行时状态。所有字段必须是 C POD —— GObject 派生
-     * 实例结构不能放 ctor/dtor，构造由 gst_pagfilter_init 显式完成、
-     * 释放由（未来的）finalize 回调显式完成。 */
-
-    /* invert：Stage 2 GObject 属性。读写都走 g_atomic_int_*，
-     * 因为 streaming 线程会读、控制线程（gst-launch / 未来 ControlChannel）会写。
-     * 用 gint 而不是 gboolean 是为了直接用 g_atomic_int_get/set。 */
-    gint invert_atomic;
-
-    /* in_info：set_caps 阶段缓存的 GstVideoInfo，transform_ip 直接用它取
-     * stride / plane offset / width / height，避免每帧重新 parse caps。
-     * 仅 streaming 线程访问（set_caps 与 transform_ip 串行），无需加锁。 */
-    GstVideoInfo in_info;
-    gboolean     info_valid;
+    /* Stage 4 起会在这里累积 PAG 渲染上下文 / 配置缓存等运行时状态。
+     * 字段必须是 C POD —— GObject 派生实例结构不能放 ctor/dtor，构造由
+     * gst_pagfilter_init 显式完成、释放由（未来的）finalize 回调显式完成。 */
 };
 
 struct _GstPagFilterClass {

@@ -8,6 +8,7 @@
 #include "log.h"
 #include "v4l2_prober.h"
 #include "gstpagfilter.h"
+#include "pag_sdk.h"
 #include <gst/gst.h>
 #include <getopt.h>
 #include <chrono>
@@ -53,8 +54,26 @@ int main(int argc, char** argv) {
     LOGI("iotcam starting, encoder={}, device={}, {}x{}@{}",
          cfg.encoder.backend, cfg.capture.device,
          cfg.capture.width, cfg.capture.height, cfg.capture.framerate);
-    LOGI("pagfilter: enabled={} invert={} file='{}' (stage2)",
-         cfg.filter.pag.enabled, cfg.filter.pag.invert, cfg.filter.pag.file);
+    LOGI("pagfilter: enabled={} selftest={} file='{}'",
+         cfg.filter.pag.enabled, cfg.filter.pag.selftest, cfg.filter.pag.file);
+
+    /* Stage 3：PAG SDK 版本日志 + 按需 selftest。
+     * - 版本日志总是打印一次，便于排查"线上跑的到底是 stub 还是真 libpag"；
+     * - selftest 仅在 cfg.filter.pag.selftest=true 时执行，独立于 pipeline。
+     *   传入的路径若为相对路径，与 shaders 同样以 cfg.config_dir/.. 为基目录解析，
+     *   保证从仓库根 / build 目录两种工作目录启动时都找得到 pag/PAG_LOGO.pag。 */
+    LOGI("pag_sdk: enabled_at_compile={} version='{}'",
+         pag_sdk::is_enabled(), pag_sdk::sdk_version());
+    if (cfg.filter.pag.selftest) {
+        std::string pag_path = cfg.filter.pag.file;
+        if (!pag_path.empty() &&
+            !std::filesystem::path(pag_path).is_absolute()) {
+            pag_path = (std::filesystem::path(cfg.config_dir) / ".." / pag_path)
+                           .lexically_normal().string();
+        }
+        const bool ok = pag_sdk::selftest_load(pag_path);
+        LOGI("pag_sdk: selftest result={} resolved='{}'", ok, pag_path);
+    }
 
     /* 启动前快速验证摄像头设备是否存在且可访问。
      * 如果设备没插 / 权限不够，这里直接返回人类可读错误并退出， */
