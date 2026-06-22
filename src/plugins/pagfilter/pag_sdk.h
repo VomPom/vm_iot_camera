@@ -2,7 +2,7 @@
 // Created by vompom on 2026/06/19.
 //
 // @Description
-//   对 Tencent/libpag 的薄抽象层（Stage 3 引入）。
+//   对 Tencent/libpag 的薄抽象层。
 //
 //   设计动机：
 //     1) 让 gstpagfilter.cpp 完全不依赖 libpag 的真实头文件——避免主工程的
@@ -11,44 +11,95 @@
 //          - ON  ：pag_sdk.cpp 调真 libpag（pag/pag.h、libpag::pag）；
 //          - OFF ：pag_sdk.cpp 仅返回固定字符串与 nullptr 状态，主二进制
 //                  不引入 libpag 依赖；
-//        这是 Stage 3 与原计划的显式偏离——避免在主分支默认引入慢编译依赖；
-//     3) Stage 4 起把渲染、PAGFile 句柄、setProgress / flush 都收敛到这层，
-//        gstpagfilter 永远只看 PagSdk::Engine 抽象。
+//     3) Stage 4.1 起新增 pag_sdk::Engine，把 PAGFile / PAGSurface / PAGPlayer
+//        三件套封到 pimpl 后面，外面只看 RGBA 像素接口。gstpagfilter 永远
+//        看不见 libpag 类型。
 //
-//   线程模型：本头里所有函数都是「主/控制线程」语义——启动期注入版本日志、
-//   按需做 selftest 加载，**绝不在 streaming 线程调用**。Stage 4 起渲染相关
-//   的入口会单独标注，并由 PagSdk::Engine 自己保证 `PAGPlayer` 不跨线程使用。
+//   线程模型：
+//     - is_enabled / sdk_version / selftest_load / Engine::Make：主/控制线程；
+//     - Engine::renderFrameRGBA：**streaming 线程**调用（与构造同线程），
+//       libpag 的 PAGPlayer 不是线程安全，调用方必须保证 Engine 对象在
+//       同一线程构造与使用。
 //
 
 #ifndef VM_IOT_PAG_SDK_H
 #define VM_IOT_PAG_SDK_H
 
+#include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <string>
 
 namespace pag_sdk {
 
-/* libpag 是否在编译期被真正链接进来。
- *   - true  : VM_IOT_ENABLE_LIBPAG=ON 时编译，pag_sdk 调真 libpag；
- *   - false : OFF 时编译，pag_sdk 仅是 stub。
- * 暴露这个 const bool 主要给 selftest 日志判断走哪个分支。 */
+/* libpag 是否在编译期被真正链接进来。 */
 bool is_enabled();
 
 /* 返回 PAG SDK 版本字符串。
  *   - enabled  : libpag 的 pag::PAG::SDKVersion()；
- *   - disabled : 固定串 "libpag(disabled)"。
- * 不会抛异常；仅做最小调用，无 IO，启动期一次即可。 */
+ *   - disabled : 固定串 "libpag(disabled)"。 */
 std::string sdk_version();
 
 /* 自检：尝试加载 .pag 文件并打印宽 / 高 / 时长。
- * Stage 3 的唯一「真链接 libpag」入口；用来证明：
- *   - libpag 头能 include；
- *   - 符号可链接；
- *   - 进程启动期调用一次不崩。
- * 返回值：
- *   - true  : 加载成功（仅 enabled 分支可能为 true）；
- *   - false : 关闭 / 文件不存在 / 解析失败；细节走日志，不抛异常。
- * Stage 3 不做渲染，加载完立刻销毁。 */
+ * Stage 3 引入；Stage 4 起 gstpagfilter 不再直接调它，统一走 Engine。
+ * 但 main.cpp 启动期保留这条路径作为冒烟检查。 */
 bool selftest_load(const std::string& pag_file_path);
+
+/* ─────────────────────── Stage 4.1：Engine 抽象 ───────────────────────
+ * 一个 Engine 封装一组「PAGFile + PAGSurface + PAGPlayer」，离屏渲染到
+ * RGBA8888（Premultiplied）。生命周期与所在 GstElement 实例 1:1 绑定。
+ *
+ * 为什么是 pimpl：libpag 的类型（pag::PAGFile / pag::PAGSurface / pag::PAGPlayer）
+ * 是带 EGL/GLES 依赖的庞大类，绝不能在 pag_sdk.h 出现。我们用前向声明的
+ * Impl 把所有 libpag 类型藏到 .cpp 里，对外只暴露 POD 输入输出。
+ *
+ * 关闭分支（VM_IOT_ENABLE_LIBPAG=OFF）：Make() 永远返回 nullptr，从而
+ * 让调用方代码（gstpagfilter / tools/pag_offscreen_dump）走 passthrough/退化
+ * 路径而无需 #ifdef 分支。 */
+class Engine {
+public:
+    /* 工厂：加载 pag_file_path，按 width×height 分配离屏 Surface。
+     * 失败原因（文件不存在 / 解析失败 / Surface 创建失败 / libpag 关闭）
+     * 走日志，统一返回 nullptr。永远不抛异常。 */
+    static std::unique_ptr<Engine> Make(const std::string& pag_file_path,
+                                        int width,
+                                        int height);
+
+    ~Engine();
+
+    /* 返回 PAGFile 原始尺寸（来自 .pag 元信息），不是 Surface 尺寸。
+     * Stage 4.3 里 gstpagfilter 用它判断是否需要 PAGScaleMode。 */
+    int  pag_width() const;
+    int  pag_height() const;
+
+    /* PAG 动画总时长（微秒）。0 表示静态 / 不可推进。
+     * gstpagfilter 用 buffer PTS 模 duration_us 算 progress。 */
+    int64_t duration_us() const;
+
+    /* Surface 实际尺寸（构造时传入的 width/height）。 */
+    int  surface_width() const;
+    int  surface_height() const;
+
+    /* 推进时间轴到 progress01 ∈ [0,1]，并把当前帧渲染到 dst_rgba_premul。
+     * dst_rgba_premul 必须至少有 row_bytes × surface_height() 字节，
+     * row_bytes 必须 >= surface_width() × 4。
+     *
+     * 像素格式：固定 RGBA_8888 + Premultiplied alpha（libpag 默认输出）。
+     *
+     * 返回 true 表示渲染并 readPixels 成功；false 表示底层 flush /
+     * readPixels 失败，调用方应直接走 passthrough。 */
+    bool render_frame_rgba(double progress01,
+                           void*  dst_rgba_premul,
+                           size_t row_bytes);
+
+private:
+    Engine();  /* 禁止外部直接 new，统一走 Make */
+    Engine(const Engine&)            = delete;
+    Engine& operator=(const Engine&) = delete;
+
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 
 }  // namespace pag_sdk
 

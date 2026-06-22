@@ -4,9 +4,15 @@
 // @Description
 //   pagfilter：vm_iot 自研 GStreamer 滤镜元素。
 //
-//   Stage 3 收尾：去掉 Stage 2 的 invert 像素特效与相关运行时状态，
-//   回归到 Stage 1 的极简骨架（do-nothing pass-through），
-//   为 Stage 4 接入 libpag 渲染留出干净起点。
+//   Stage 4.3：接入 libpag 渲染。
+//     - 新增 GObject 属性 `pag-file` (string, NULL/READY 时可写)：
+//       为空字符串或 NULL 时元素保持 passthrough；非空时启动期在 set_caps
+//       中按 (width, height) 创建 pag_sdk::Engine，transform_ip 内每帧
+//       渲染 RGBA premul 帧并 alpha-blend 到 I420 buffer 上。
+//     - libpag 真集成时（VM_IOT_ENABLE_LIBPAG=ON）才真正渲染；
+//       VM_IOT_ENABLE_LIBPAG=OFF 时 Engine::Make 永远返 nullptr，
+//       元素自动退化回 passthrough（单测路径走这里）。
+//     - 热切换 / 运行时改 pag-file 留给 Stage 4.4。
 //
 
 #ifndef VM_IOT_GSTPAGFILTER_H
@@ -16,6 +22,7 @@
 
 #include <gst/gst.h>
 #include <gst/base/gstbasetransform.h>
+#include <gst/video/video-info.h>
 
 G_BEGIN_DECLS
 
@@ -28,11 +35,27 @@ G_BEGIN_DECLS
 typedef struct _GstPagFilter      GstPagFilter;
 typedef struct _GstPagFilterClass GstPagFilterClass;
 
+/* 实例结构必须是 C POD：所有 C++ 对象通过裸指针持有，在 init 中置 NULL、
+ * 在 finalize 中显式 delete。
+ *
+ * Engine / rgba_buf 在 .cpp 内 #include "pag_sdk.h" 后会被前向声明引用——
+ * 这里用 void* 避免把 C++ 头泄到本头文件。 */
 struct _GstPagFilter {
     GstBaseTransform parent;
-    /* Stage 4 起会在这里累积 PAG 渲染上下文 / 配置缓存等运行时状态。
-     * 字段必须是 C POD —— GObject 派生实例结构不能放 ctor/dtor，构造由
-     * gst_pagfilter_init 显式完成、释放由（未来的）finalize 回调显式完成。 */
+
+    /* ─── 配置（由 pag-file 属性写入，NULL/READY 时合法）─── */
+    gchar*           pag_file_path;     /* g_strdup 出来，finalize 中 g_free */
+
+    /* ─── 协商后缓存（set_caps 写、transform_ip 读，单线程）─── */
+    GstVideoInfo*    in_info;           /* new/delete；NULL 表示尚未协商 */
+
+    /* ─── 渲染状态（仅 streaming 线程访问）─── */
+    void*            engine;            /* pag_sdk::Engine*；NULL 表示 passthrough */
+    void*            rgba_buf;          /* std::vector<uint8_t>*；engine 命中时分配 */
+
+    /* ─── PTS → progress 推进 ─── */
+    GstClockTime     stream_start_pts;  /* 首帧 PTS；GST_CLOCK_TIME_NONE 表示未定 */
+    guint64          frame_counter;     /* PTS 不可用时的退化路径计数器 */
 };
 
 struct _GstPagFilterClass {

@@ -4,6 +4,7 @@
 #include "shader_filter.h"
 #include "branch_base.h"
 #include "snapshot.h"
+#include "pag_overlay.h"
 #include "control_channel.h"
 #include "log.h"
 #include "v4l2_prober.h"
@@ -13,6 +14,7 @@
 #include <getopt.h>
 #include <chrono>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -28,6 +30,25 @@ static std::string extract_config_path(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
+    /* Stage 4.4 后续修复（headless Pi EGL 兼容）：
+     *
+     * 树莓派/Ubuntu 在没有 X/Wayland 会话时，Mesa 的 EGL 默认平台会按
+     * `DISPLAY` 推断到 x11 后端，导致 libpag 内部 `eglInitialize` /
+     * `eglCreatePbufferSurface` 在流线程上首次调用时返回 12289
+     * (EGL_NOT_INITIALIZED)，最终 `PAGSurface::MakeOffscreen` 失败、
+     * pagfilter 静默退化为 passthrough。
+     *
+     * 这里强制指定 `surfaceless` 平台，让 Mesa 走 EGL_PLATFORM_SURFACELESS
+     * 路径——纯离屏渲染不依赖任何窗口系统。第三参数 `0` 表示「已设置则
+     * 不覆盖」，保留运维通过环境变量手动覆盖的能力（例如本地接显示器
+     * 调试时设 `EGL_PLATFORM=wayland`）。
+     *
+     * 必须放在 gst_init 之前：GStreamer 的某些插件（如 gst-gl）会在
+     * gst_init 期间探测 EGL，时机更早能避免极少数 race。同时 libpag 在
+     * 流线程首次 Engine::Make 时才真正用到 EGL，环境变量在主线程预先
+     * 设置后，所有派生线程都会继承。 */
+    ::setenv("EGL_PLATFORM", "surfaceless", 0);
+
     gst_init(&argc, &argv);
 
     /* 静态注册项目自研 GStreamer 元素（目前仅 pagfilter）。
@@ -118,11 +139,33 @@ int main(int argc, char** argv) {
     /* 截图副线与其他副线平级：独立于 RtspServer，只需 RtspServer 在 media-configure
      * 时帮它 attach。输出目录 / 质量 / 超时都由 cfg.snapshot 供给。 */
     snapshot.configure(cfg.snapshot.dir, cfg.snapshot.quality, cfg.snapshot.timeout_ms);
+
+    /* PAG 叠加副线（Stage 4.4）：仅在 cfg.filter.pag.enabled=true 时启用。
+     * PipelineBuilder 已经在主线 raw 段插入 `pagfilter name=pag0`，本模块
+     * 负责在 media-configure 时把绝对化后的 pag-file 一次性注入到该元素。
+     * 路径解析与 selftest / shaders 一致：相对路径以 cfg.config_dir/.. 为基目录，
+     * 保证从仓库根 / build 目录两种工作目录启动时都找得到资源。 */
+    PagOverlay pag_overlay;
+    if (cfg.filter.pag.enabled) {
+        std::string pag_path = cfg.filter.pag.file;
+        if (!pag_path.empty() &&
+            !std::filesystem::path(pag_path).is_absolute()) {
+            pag_path = (std::filesystem::path(cfg.config_dir) / ".." / pag_path)
+                           .lexically_normal().string();
+        }
+        pag_overlay.configure(pag_path);
+    }
+
     /* 把所有 branch 实例统一成 BranchBase* 列表交给 RtspServer。
      * 顺序无强约束（每个 branch 抓自己的命名元素，互不干扰）；未来新增 detect / cloud_upload
      * 之类副线时只需在此 push 一个新对象，RtspServer 不用改。
+     * pag_overlay 仅在 filter.pag.enabled=true 时入列：pipeline 里没有 pag0 元素时
+     * BranchBase 会 warn 一行然后无害跳过，但提前过滤可以让日志更干净。
      */
     std::vector<BranchBase*> branches{&snapshot};
+    if (cfg.filter.pag.enabled) {
+        branches.push_back(&pag_overlay);
+    }
 
     if (!server.start(cfg, cfg.filter.enabled ? &filter : nullptr, branches))
     {
@@ -151,6 +194,7 @@ int main(int argc, char** argv) {
      *   3) 最后停 RtspServer / filter：释放 server 与共享资源。 */
     ctrl.stop();
     snapshot.shutdown();
+    pag_overlay.shutdown();
     server.stop();
     filter.shutdown();
     g_main_loop_unref(loop);

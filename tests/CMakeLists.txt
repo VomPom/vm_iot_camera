@@ -15,15 +15,17 @@ set(VM_IOT_TEST_SRCS
         ${CMAKE_SOURCE_DIR}/src/pipeline/pipeline_builder.cpp
         ${CMAKE_SOURCE_DIR}/src/plugins/pagfilter/gstpagfilter.cpp
         ${CMAKE_SOURCE_DIR}/src/plugins/pagfilter/pag_sdk.cpp
+        ${CMAKE_SOURCE_DIR}/src/plugins/pagfilter/pag_blend.cpp
 )
 
 # pipeline_builder.cpp 包含 <gst/gst.h>，需要 GStreamer 的 include / link。
-# pagfilter 另外依赖 gstreamer-base（GstBaseTransform）；
-# Stage 1/3 单测目前不需要 gstreamer-app/video，未来如有 appsrc/appsink 用例再补。
+# pagfilter 另外依赖 gstreamer-base（GstBaseTransform）与 gstreamer-video
+# （Stage 4.3 起 transform_ip 用 GstVideoFrame 取 plane 指针/stride）。
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GST_TEST REQUIRED IMPORTED_TARGET
         gstreamer-1.0
-        gstreamer-base-1.0)
+        gstreamer-base-1.0
+        gstreamer-video-1.0)
 
 # 共享的 include 目录与外部依赖
 set(VM_IOT_TEST_INCLUDES

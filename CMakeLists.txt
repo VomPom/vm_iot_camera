@@ -40,6 +40,7 @@ target_include_directories(vm_iot
         src/filter
         src/branches
         src/branches/snapshot
+        src/branches/pag_overlay
         src/control
         src/rtsp
         src/util
@@ -83,6 +84,25 @@ if (VM_IOT_ENABLE_LIBPAG)
     message(STATUS "vm_iot: libpag    -> ${_libpag_lib}")
     message(STATUS "vm_iot: EGL       -> ${VM_IOT_LIBEGL}")
     message(STATUS "vm_iot: GLESv2    -> ${VM_IOT_LIBGLESV2}")
+
+    # ---- Stage 4.1: pag_offscreen_dump（离屏渲染 PoC CLI） ----
+    # 仅在 libpag 开启时构建；用于在目标平台验证 PAGSurface::MakeOffscreen
+    # + PAGPlayer 链路是否真能跑出像素。dump 出 BMP 方便肉眼检查。
+    # 故意复用 vm_iot 同一份 pag_sdk.cpp（带 VM_IOT_ENABLE_LIBPAG=1 定义），
+    # 避免双份目标重复 link libpag。
+    add_executable(pag_offscreen_dump
+            ${CMAKE_SOURCE_DIR}/tools/pag_offscreen_dump.cpp
+            ${CMAKE_SOURCE_DIR}/src/plugins/pagfilter/pag_sdk.cpp)
+    target_compile_definitions(pag_offscreen_dump PRIVATE VM_IOT_ENABLE_LIBPAG=1)
+    target_include_directories(pag_offscreen_dump PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/common
+            ${CMAKE_SOURCE_DIR}/src/plugins/pagfilter
+            "${_libpag_include}")
+    target_link_libraries(pag_offscreen_dump PRIVATE
+            "${_libpag_lib}"
+            ${VM_IOT_LIBEGL} ${VM_IOT_LIBGLESV2}
+            ${CMAKE_DL_LIBS}
+            spdlog::spdlog)
 else ()
     target_compile_definitions(vm_iot PRIVATE VM_IOT_ENABLE_LIBPAG=0)
     message(STATUS "vm_iot: libpag disabled")
