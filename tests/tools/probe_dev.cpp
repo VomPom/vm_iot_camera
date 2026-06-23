@@ -1,10 +1,10 @@
 //
-// tools/probe_dev.cpp
+// tests/tools/probe_dev.cpp
 //
 // 手动验证小工具：在 Linux 设备上跑 ./probe_dev /dev/video0，对比
 // 系统 `v4l2-ctl --list-formats-ext` 的输出，确认我们的 V4L2Prober
 // 探测结果与官方工具一致；同时用默认 RankPolicy 跑一遍 CapsRanker
-// 把候选排序打印出来，验证 Stage 2 的评分结果是否符合直觉。
+// 把候选排序打印出来，验证评分结果是否符合直觉。
 //
 // 用法：
 //   ./probe_dev                  默认探测 /dev/video0

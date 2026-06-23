@@ -10,7 +10,7 @@
 //       streaming 线程被反复调用；
 //     - 失败时仅返回 false / nullptr，由调用方决定如何打印（避免重复打印）。
 //
-//   Stage 4.1 起 Engine（pimpl）在此实现：
+//   Engine（pimpl）在此实现：
 //     - 真分支：持有 pag::PAGFile / pag::PAGSurface / pag::PAGPlayer 三件套；
 //     - stub 分支：Impl 不存在，Engine::Make 永远返回 nullptr。
 //
@@ -204,7 +204,7 @@ bool Engine::render_frame_rgba(double progress01,
     return true;
 }
 
-/* ─────────────────── Stage 5：图层替换实现（真分支） ─────────────────── */
+/* ─────────────────── 图层替换实现（真分支） ─────────────────── */
 
 int Engine::num_texts() const {
     if (!impl_ || !impl_->file) return 0;
@@ -308,7 +308,7 @@ bool Engine::render_frame_rgba(double, void*, size_t) {
     return false;
 }
 
-/* Stage 5 stub：Engine 在 stub 分支根本不会被构造，但保留符号定义
+/* stub：Engine 在 stub 分支根本不会被构造，但保留符号定义
  * 避免单测/上层在编译期 reference 缺失。 */
 int  Engine::num_texts()  const { return 0; }
 int  Engine::num_images() const { return 0; }

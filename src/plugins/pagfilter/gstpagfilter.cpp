@@ -4,8 +4,8 @@
 // @Description
 //   见 gstpagfilter.h 顶部说明。
 //
-//   Stage 5 实现要点（在 4.3 基础上）：
-//     - `pag-file` 改为 GST_PARAM_MUTABLE_PLAYING：PLAYING 状态也能改，
+//   实现要点：
+//     - `pag-file` 为 GST_PARAM_MUTABLE_PLAYING：PLAYING 状态也能改，
 //       变更不会立即重建 Engine，而是写到 pending_pag_file_ + reload_pending
 //       由 streaming 线程下一帧拿 engine_lock 安全消费（避免 set_caps /
 //       transform_ip / set_property 三个线程互相打架）。
@@ -39,7 +39,7 @@
 GST_DEBUG_CATEGORY_STATIC(gst_pagfilter_debug);
 #define GST_CAT_DEFAULT gst_pagfilter_debug
 
-/* 仍仅声明 I420。Stage 4.4 主管线接入时若需扩 NV12/RGBA 再回来升级。 */
+/* 仅声明 I420。未来若需扩 NV12/RGBA 再回来升级。 */
 #define PAGFILTER_CAPS_STR \
     "video/x-raw, " \
     "format = (string) I420, " \
@@ -73,7 +73,7 @@ G_DEFINE_TYPE(GstPagFilter, gst_pagfilter, GST_TYPE_BASE_TRANSFORM);
 
 /* 把实例上的 Engine + 像素缓存释放掉。可重复调用，状态写回 NULL。
  * **调用方必须持 engine_lock_**（如果 lock 已分配的话）。
- * set_caps 重协商、stop、finalize、Stage 5 的热切流程都会走它。 */
+ * set_caps 重协商、stop、finalize、热切流程都会走它。 */
 static void
 gst_pagfilter_release_engine_locked(GstPagFilter* self) {
     if (self->engine != nullptr) {
@@ -193,8 +193,8 @@ i420_to_rgba_bt601(const GstVideoFrame* vf,
 /* ─────────────────────── vmethod 实现 ─────────────────────── */
 
 /* set_caps：基类已校验 incaps/outcaps 通过模板。
- * Stage 4.3：缓存 GstVideoInfo + 按 pag-file 创建 Engine + 切 passthrough。
- * Stage 5：分配 engine_lock_ 并把重建 Engine 路径统一走 rebuild_engine_locked。 */
+ * 缓存 GstVideoInfo + 按 pag-file 创建 Engine + 切 passthrough，
+ * 完成后均走 rebuild_engine_locked 重建 Engine。 */
 static gboolean
 gst_pagfilter_set_caps(GstBaseTransform* trans,
                        GstCaps*          incaps,
@@ -245,7 +245,7 @@ gst_pagfilter_set_caps(GstBaseTransform* trans,
         GST_INFO_OBJECT(self, "pagfilter: render enabled after caps negotiation");
     } else {
         /* 没设 pag-file 或 Engine::Make 失败：维持 passthrough。
-         * Stage 5 关键点：即便 PLAYING 后续 set_property("pag-file") 改了
+ * 关键点：即便 PLAYING 后续 set_property("pag-file") 改了
          * 路径，下一帧 transform_ip 也走不进来（passthrough 模式 BaseTransform
          * 直接短路）。所以热切的 reload_pending 消费点必须放在 set_property
          * 触发 set_passthrough(FALSE) 的同时——见 set_property 实现。 */
@@ -426,7 +426,7 @@ gst_pagfilter_transform_ip(GstBaseTransform* trans,
     src.height    = sh;
     src.row_bytes = static_cast<int>(row_bytes);
 
-    /* 当前贴到左上角 (0,0)。Stage 5 仅扩图层替换，锚点/缩放仍后置。 */
+    /* 当前贴到左上角 (0,0)。锥点/缩放后置。 */
     if (!pag_blend::blend_rgba_premul_over_i420(src, dst, 0, 0)) {
         GST_WARNING_OBJECT(self,
                            "pagfilter: blend_rgba_premul_over_i420 rejected "
@@ -467,7 +467,7 @@ gst_pagfilter_set_property(GObject*      object,
 
     switch (prop_id) {
     case PROP_PAG_FILE: {
-        /* Stage 5：允许 PLAYING 状态热切。逻辑分两段：
+    /* 允许 PLAYING 状态热切。逻辑分两段：
          *   - 状态 ≤ READY：直接更新 pag_file_path_（set_caps 还没跑或重跑时
          *     再按它构造 Engine）；
          *   - 状态 ≥ PAUSED：写入 pending_pag_file_ + reload_pending，
@@ -645,7 +645,7 @@ gst_pagfilter_class_init(GstPagFilterClass* klass) {
             "pag-file",
             "PAG file path",
             "Path to a .pag asset. Empty/NULL keeps element in passthrough. "
-            "Stage 5: writable in any state including PLAYING; hot-swap "
+            "Writable in any state including PLAYING; hot-swap "
             "is queued and applied at next streaming-thread frame.",
             "",
             static_cast<GParamFlags>(
@@ -717,7 +717,7 @@ gst_pagfilter_init(GstPagFilter* self) {
     self->stream_start_pts = GST_CLOCK_TIME_NONE;
     self->frame_counter    = 0;
 
-    /* Stage 5 字段 */
+    /* 热切 / 图层替换 字段 */
     GMutex* lk = static_cast<GMutex*>(g_malloc0(sizeof(GMutex)));
     g_mutex_init(lk);
     self->engine_lock        = lk;

@@ -51,10 +51,10 @@ target_include_directories(vm_iot
 target_link_libraries(vm_iot PUBLIC
         PkgConfig::GST yaml-cpp spdlog::spdlog Threads::Threads)
 
-# ---- libpag（Stage 3 引入）----
+# ---- libpag ----
 # 目标平台只考虑树莓派 aarch64 Debian/Raspbian。其他平台请自行扩展。
 # 运行依赖：sudo apt install libegl-dev libgles2-mesa-dev
-set(VM_IOT_ENABLE_LIBPAG "Link Tencent/libpag for PAG rendering" ON)
+set(VM_IOT_ENABLE_LIBPAG OFF)
 message(STATUS "VM_IOT_ENABLE_LIBPAG=${VM_IOT_ENABLE_LIBPAG}")
 
 if (VM_IOT_ENABLE_LIBPAG)
@@ -84,25 +84,6 @@ if (VM_IOT_ENABLE_LIBPAG)
     message(STATUS "vm_iot: libpag    -> ${_libpag_lib}")
     message(STATUS "vm_iot: EGL       -> ${VM_IOT_LIBEGL}")
     message(STATUS "vm_iot: GLESv2    -> ${VM_IOT_LIBGLESV2}")
-
-    # ---- Stage 4.1: pag_offscreen_dump（离屏渲染 PoC CLI） ----
-    # 仅在 libpag 开启时构建；用于在目标平台验证 PAGSurface::MakeOffscreen
-    # + PAGPlayer 链路是否真能跑出像素。dump 出 BMP 方便肉眼检查。
-    # 故意复用 vm_iot 同一份 pag_sdk.cpp（带 VM_IOT_ENABLE_LIBPAG=1 定义），
-    # 避免双份目标重复 link libpag。
-    add_executable(pag_offscreen_dump
-            ${CMAKE_SOURCE_DIR}/tools/pag_offscreen_dump.cpp
-            ${CMAKE_SOURCE_DIR}/src/plugins/pagfilter/pag_sdk.cpp)
-    target_compile_definitions(pag_offscreen_dump PRIVATE VM_IOT_ENABLE_LIBPAG=1)
-    target_include_directories(pag_offscreen_dump PRIVATE
-            ${CMAKE_SOURCE_DIR}/src/common
-            ${CMAKE_SOURCE_DIR}/src/plugins/pagfilter
-            "${_libpag_include}")
-    target_link_libraries(pag_offscreen_dump PRIVATE
-            "${_libpag_lib}"
-            ${VM_IOT_LIBEGL} ${VM_IOT_LIBGLESV2}
-            ${CMAKE_DL_LIBS}
-            spdlog::spdlog)
 else ()
     target_compile_definitions(vm_iot PRIVATE VM_IOT_ENABLE_LIBPAG=0)
     message(STATUS "vm_iot: libpag disabled")
@@ -118,7 +99,7 @@ add_executable(vm_iot_ctl
 # Linux 设备能力手动验证工具：跑 ./probe_dev /dev/video0 与
 # `v4l2-ctl --list-formats-ext` 输出对比。仅依赖 v4l2_prober + caps_ranker。
 add_executable(probe_dev
-        ${CMAKE_SOURCE_DIR}/tools/probe_dev.cpp
+        ${CMAKE_SOURCE_DIR}/tests/tools/probe_dev.cpp
         ${CMAKE_SOURCE_DIR}/src/util/v4l2_prober.cpp
         ${CMAKE_SOURCE_DIR}/src/util/caps_ranker.cpp)
 target_include_directories(probe_dev PRIVATE
@@ -130,31 +111,17 @@ target_link_libraries(probe_dev PRIVATE spdlog::spdlog)
 install(TARGETS vm_iot vm_iot_ctl RUNTIME DESTINATION bin)
 
 # ---- 资源同步 ----
+# 把仓库根的运行期资源整体 symlink 到二进制目录，方便从 build/ 直接跑可执行文件。
+# 所有运行期资源（config / pag / shaders）已物理收敛到顶层 assets/ 目录下，
+# 只需链一个 assets 软链即可，子目录通过 cfg.config_dir/.. 路径自然解析到位。
+# 注意：CMake -E create_symlink 在 Windows 需要管理员权限，当前目标平台为 Linux 不受影响。
 add_custom_command(TARGET vm_iot POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E rm -rf
-        $<TARGET_FILE_DIR:vm_iot>/config
+        $<TARGET_FILE_DIR:vm_iot>/assets
         COMMAND ${CMAKE_COMMAND} -E create_symlink
-        ${CMAKE_SOURCE_DIR}/config
-        $<TARGET_FILE_DIR:vm_iot>/config
-        COMMENT "Linking config/ -> $<TARGET_FILE_DIR:vm_iot>/config (symlink)"
-        VERBATIM)
-
-add_custom_command(TARGET vm_iot POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E rm -rf
-        $<TARGET_FILE_DIR:vm_iot>/pag
-        COMMAND ${CMAKE_COMMAND} -E create_symlink
-        ${CMAKE_SOURCE_DIR}/pag
-        $<TARGET_FILE_DIR:vm_iot>/pag
-        COMMENT "Linking pag/ -> $<TARGET_FILE_DIR:vm_iot>/pag (symlink)"
-        VERBATIM)
-
-add_custom_command(TARGET vm_iot POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E rm -rf
-        $<TARGET_FILE_DIR:vm_iot>/shaders
-        COMMAND ${CMAKE_COMMAND} -E create_symlink
-        ${CMAKE_SOURCE_DIR}/shaders
-        $<TARGET_FILE_DIR:vm_iot>/shaders
-        COMMENT "Linking shaders/ -> $<TARGET_FILE_DIR:vm_iot>/shaders (symlink)"
+        ${CMAKE_SOURCE_DIR}/assets
+        $<TARGET_FILE_DIR:vm_iot>/assets
+        COMMENT "Linking assets/ -> $<TARGET_FILE_DIR:vm_iot>/assets (symlink)"
         VERBATIM)
 
 # ---- 单元测试 ----

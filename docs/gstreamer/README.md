@@ -16,7 +16,7 @@
                                   └─► glshader (name=f0)
                               └─► glcolorconvert ─► gldownload
                                   └─► videoconvert
-        └─► [pagfilter]                # Stage 2：默认 passthrough；invert=true 时颜色反相，cfg.filter.pag.* 控制
+        └─► [pagfilter]                # pag-file 空时 passthrough；非空则按 .pag 渲染并 alpha-blend 到 I420，支持 PLAYING 热切（cfg.filter.pag.* + iotcamctl pag *）
                                           └─► tee  name=t        # raw 锚点
                                                    ├──► [branch:snapshot]
                                                    │     queue ─► valve(snap_valve)
@@ -66,7 +66,7 @@
 - [queue](./queue.md) —— 缓冲与解耦线程边界
 - [valve](./valve.md) —— 数据闸阀（按需开闭）
 - [identity](./identity.md) —— 透传占位元素（项目录像副线锚点 `rec_tail`）
-- [pagfilter](./pagfilter.md) —— 自研滤镜（Stage 2 可选颜色反相，规划接入 libpag）
+- [pagfilter](./pagfilter.md) —— 自研滤镜（libpag 渲染 + 文本/视频图层 PLAYING 热替换）
 
 ### 6. Encoder（编码器）
 - [x264enc](./x264enc.md) —— H.264 软编（libx264）

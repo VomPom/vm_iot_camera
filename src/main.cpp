@@ -26,11 +26,11 @@ static std::string extract_config_path(int argc, char** argv) {
         std::string a = argv[i];
         if (a == "-c" || a == "--config") return argv[i + 1];
     }
-    return "config/default.yaml";
+    return "assets/config/default.yaml";
 }
 
 int main(int argc, char** argv) {
-    /* Stage 4.4 后续修复（headless Pi EGL 兼容）：
+    /* headless Pi EGL 兼容：
      *
      * 树莓派/Ubuntu 在没有 X/Wayland 会话时，Mesa 的 EGL 默认平台会按
      * `DISPLAY` 推断到 x11 后端，导致 libpag 内部 `eglInitialize` /
@@ -78,7 +78,7 @@ int main(int argc, char** argv) {
     LOGI("pagfilter: enabled={} selftest={} file='{}'",
          cfg.filter.pag.enabled, cfg.filter.pag.selftest, cfg.filter.pag.file);
 
-    /* Stage 3：PAG SDK 版本日志 + 按需 selftest。
+    /* PAG SDK 版本日志 + 按需 selftest。
      * - 版本日志总是打印一次，便于排查"线上跑的到底是 stub 还是真 libpag"；
      * - selftest 仅在 cfg.filter.pag.selftest=true 时执行，独立于 pipeline。
      *   传入的路径若为相对路径，与 shaders 同样以 cfg.config_dir/.. 为基目录解析，
@@ -140,7 +140,7 @@ int main(int argc, char** argv) {
      * 时帮它 attach。输出目录 / 质量 / 超时都由 cfg.snapshot 供给。 */
     snapshot.configure(cfg.snapshot.dir, cfg.snapshot.quality, cfg.snapshot.timeout_ms);
 
-    /* PAG 叠加副线（Stage 4.4）：仅在 cfg.filter.pag.enabled=true 时启用。
+    /* PAG 叠加副线：仅在 cfg.filter.pag.enabled=true 时启用。
      * PipelineBuilder 已经在主线 raw 段插入 `pagfilter name=pag0`，本模块
      * 负责在 media-configure 时把绝对化后的 pag-file 一次性注入到该元素。
      * 路径解析与 selftest / shaders 一致：相对路径以 cfg.config_dir/.. 为基目录，

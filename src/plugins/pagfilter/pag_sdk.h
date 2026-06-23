@@ -11,7 +11,7 @@
 //          - ON  ：pag_sdk.cpp 调真 libpag（pag/pag.h、libpag::pag）；
 //          - OFF ：pag_sdk.cpp 仅返回固定字符串与 nullptr 状态，主二进制
 //                  不引入 libpag 依赖；
-//     3) Stage 4.1 起新增 pag_sdk::Engine，把 PAGFile / PAGSurface / PAGPlayer
+//     3) pag_sdk::Engine 把 PAGFile / PAGSurface / PAGPlayer
 //        三件套封到 pimpl 后面，外面只看 RGBA 像素接口。gstpagfilter 永远
 //        看不见 libpag 类型。
 //
@@ -41,11 +41,11 @@ bool is_enabled();
 std::string sdk_version();
 
 /* 自检：尝试加载 .pag 文件并打印宽 / 高 / 时长。
- * Stage 3 引入；Stage 4 起 gstpagfilter 不再直接调它，统一走 Engine。
- * 但 main.cpp 启动期保留这条路径作为冒烟检查。 */
+ * gstpagfilter 运行期不调它，统一走 Engine；
+ * main.cpp 启动期保留这条路径作为冒烟检查。 */
 bool selftest_load(const std::string& pag_file_path);
 
-/* ─────────────────────── Stage 4.1：Engine 抽象 ───────────────────────
+/* ─────────────────────── Engine 抽象 ───────────────────────
  * 一个 Engine 封装一组「PAGFile + PAGSurface + PAGPlayer」，离屏渲染到
  * RGBA8888（Premultiplied）。生命周期与所在 GstElement 实例 1:1 绑定。
  *
@@ -54,7 +54,7 @@ bool selftest_load(const std::string& pag_file_path);
  * Impl 把所有 libpag 类型藏到 .cpp 里，对外只暴露 POD 输入输出。
  *
  * 关闭分支（VM_IOT_ENABLE_LIBPAG=OFF）：Make() 永远返回 nullptr，从而
- * 让调用方代码（gstpagfilter / tools/pag_offscreen_dump）走 passthrough/退化
+ * 让调用方代码（gstpagfilter）走 passthrough/退化
  * 路径而无需 #ifdef 分支。 */
 class Engine {
 public:
@@ -68,7 +68,7 @@ public:
     ~Engine();
 
     /* 返回 PAGFile 原始尺寸（来自 .pag 元信息），不是 Surface 尺寸。
-     * Stage 4.3 里 gstpagfilter 用它判断是否需要 PAGScaleMode。 */
+     * gstpagfilter 用它判断是否需要 PAGScaleMode。 */
     int  pag_width() const;
     int  pag_height() const;
 
@@ -92,7 +92,7 @@ public:
                            void*  dst_rgba_premul,
                            size_t row_bytes);
 
-    /* ──────────────────── Stage 5：图层替换 API ────────────────────
+    /* ─────────────────── 图层替换 API ───────────────────
      * 所有 replace_* 仅修改 PAGFile 内部图层引用，对下一次 render_frame_rgba
      * 生效；调用方仍要负责按业务节奏推 progress。
      *

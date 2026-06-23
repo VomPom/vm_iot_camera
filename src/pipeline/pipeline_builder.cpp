@@ -319,7 +319,8 @@ std::string PipelineBuilder::build(const Config& c) {
      * 与 GL 段解耦——任一段单独 enable 都能跑通。
      * name=pag0 是约定名，便于未来从 ControlChannel 通过
      * gst_bin_get_by_name 拿到实例做热控。
-     * 当前实现为 passthrough 骨架，Stage 4 起会真正渲染 .pag 到画面。 */
+     * pagfilter 在 pag-file 非空时按 .pag 渲染并 alpha-blend 到画面上，
+     * 为空则退化为 passthrough。 */
     if (c.filter.pag.enabled) {
         os << " ! pagfilter name=pag0";
     }

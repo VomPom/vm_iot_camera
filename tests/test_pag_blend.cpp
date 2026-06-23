@@ -2,7 +2,7 @@
 // Created by vompom on 2026/06/21.
 //
 // @Description
-//   Stage 4.2 算法层单测：pag_blend::blend_rgba_premul_over_i420。
+//   算法层单测：pag_blend::blend_rgba_premul_over_i420。
 //
 //   测试策略：
 //     - 颜色空间 helper（rgb_to_y/u/v）先单独验证，再验证 blend；

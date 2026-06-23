@@ -70,10 +70,9 @@ Config Config::from_file(const std::string& path) {
         }
 
     /* filter.pag.*：读 enabled / selftest / file。
-         * file 为空且 enabled=true 允许（Stage 1/2 不读文件）。
-         * invert 与 enabled 独立生效：enabled=true && invert=false
-         * 时 pagfilter 仍为默认 passthrough，行为等同 Stage 1。
-         * selftest 与 enabled 也独立：用来在不修改 pipeline 的前提下
+         * file 为空且 enabled=true 允许：此时 pagfilter 仍在管线中，但会退化
+         * 为 passthrough，行为等价于完全没有该元素。
+         * selftest 与 enabled 独立：用来在不修改 pipeline 的前提下
          * 单独验证 libpag 链接是否通。 */
     if (auto p = f["pag"]) {
         c.filter.pag.enabled  = p["enabled" ].as<bool>(c.filter.pag.enabled);
@@ -200,7 +199,7 @@ void apply_kv(Config& cfg, const std::string& key, const std::string& value) {
 void print_help() {
     std::printf(
         "Usage: iotcam [OPTIONS]\n"
-        "  -c, --config FILE         load YAML config (default: config/default.yaml)\n"
+"  -c, --config FILE         load YAML config (default: assets/config/default.yaml)\n"
         "  -d, --device PATH         alias of --set capture.device=PATH\n"
         "  -p, --port N              alias of --set server.port=N\n"
         "  -b, --bitrate KBPS        alias of --set encoder.bitrate_kbps=KBPS\n"

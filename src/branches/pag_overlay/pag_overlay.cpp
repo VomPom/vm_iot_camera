@@ -43,7 +43,7 @@ bool PagOverlay::on_attached_locked() {
     return true;
 }
 
-/* ───────────────────── Stage 5：运行时热控实现 ───────────────────── */
+/* ───────────────────── 运行时热控实现 ─────────────────── */
 
 bool PagOverlay::set_pag_file(const std::string& abs_path, std::string& err) {
     std::lock_guard<std::mutex> lk(mu_);

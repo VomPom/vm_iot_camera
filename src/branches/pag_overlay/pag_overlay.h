@@ -19,10 +19,9 @@
 //     3) 之后 pagfilter 自己在 set_caps 时按属性值 Engine::Make，渲染就生效了。
 //
 //   作用域（明确不做的事）：
-//     - 不做热切换：Stage 4.4 不支持运行时改 pag-file（pagfilter 也只允许
-//       NULL/READY 改）；未来若需要热切，应在新 stage 中扩展。
-//     - 不做 ControlChannel 集成：本阶段无 `pag set/get` 命令；
 //     - 不接管渲染：所有像素工作都在 pagfilter 内部完成，本类只搬属性。
+//     - 运行时热控：提供 set_pag_file / set_pag_text / set_pag_replace_image*
+//       接口，上层（ControlChannel）调用后转手写 pag0 元素属性。
 //
 //   生命周期框架（attach/unprepared/shutdown/ready）由 BranchBase 兜底，
 //   本类只填三件事：要抓哪些元素、抓到后做什么属性注入、有无需停的异步活动。
@@ -44,7 +43,7 @@ public:
      * 空字符串等价于"不注入"，元素维持 passthrough。 */
     void configure(const std::string& abs_pag_file_path);
 
-    /* ── Stage 5：运行时热控 API（供 ControlChannel 调用）──
+    /* ── 运行时热控 API（供 ControlChannel 调用）──
      * 所有方法线程安全：内部加 BranchBase::mu_，转手调 pag0 元素的
      * GObject 属性，pagfilter 自身会把变更排队到 streaming 线程消费。
      *

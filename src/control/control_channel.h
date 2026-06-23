@@ -99,7 +99,7 @@ public:
      *   req_path / reply_path 为空串时分别表示"不开请求 FIFO"/"不写回执"。
      *   filter / cfg / server / snapshot 必须在 ControlChannel 生命周期内保持存活。
      *   pag_overlay 可为 nullptr（filter.pag.enabled=false 时）；非空时启用
-     *   `pag set-*` 命令族（Stage 5）。
+     *   `pag set-*` 命令族。
      *   start_time 用于 status 命令计算 uptime；通常传 main 启动时记录的 steady_clock::now()。
      * 失败返回 false（mkfifo / open 错误）；成功后 source 已挂到默认 GMainContext。 */
     bool start(const std::string& req_path,
@@ -133,7 +133,7 @@ private:
     std::string handle_status() const;
     std::string handle_snapshot(const std::vector<std::string>& toks) const;
     std::string handle_record(const std::vector<std::string>& toks);
-    /* Stage 5：PAG 命令族（set-file / set-text / set-replace-image / get）。
+    /* PAG 命令族（set-file / set-text / set-replace-image / get）。
      * 与上面命令一样：原始命令行已 trim/split，本函数负责再 join 出回执的 cmd 部分。
      * pag_overlay_ 为 nullptr 时所有子命令统一返 "pag_disabled"。 */
     std::string handle_pag(const std::vector<std::string>& toks);

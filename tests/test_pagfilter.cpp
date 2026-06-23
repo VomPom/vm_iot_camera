@@ -4,7 +4,7 @@
 // @Description
 //   pagfilter 元素的最小单元测试。
 //
-//   覆盖范围（Stage 4.3 收尾后）：
+//   覆盖范围：
 //     - 静态注册：pagfilter_register_static() 多次调用幂等；
 //     - 元素工厂：gst_element_factory_make("pagfilter", ...) 能拿到实例；
 //     - Pad 模板：sink/src 都有 ALWAYS pad，caps 包含 video/x-raw + I420；
@@ -12,7 +12,7 @@
 //       且 pag-file 为空时即使经过 set_caps 也仍 passthrough；
 //     - launch 串：videotestsrc ! pagfilter ! fakesink 能进 PAUSED 状态
 //       （macOS 下也可跑通，不依赖摄像头）；
-//     - Stage 4.3 属性 `pag-file`：读写、空值语义、stub 退化语义；
+//     - 属性 `pag-file`：读写、空值语义、stub 退化语义；
 //     - pag_sdk stub 行为：单测构建强制 VM_IOT_ENABLE_LIBPAG=0
 //       （见 tests/CMakeLists.txt），固定 stub 契约。
 //
@@ -63,7 +63,7 @@ TEST_F(PagFilterTest, FactoryProducesElement) {
 }
 
 TEST_F(PagFilterTest, DefaultsToPassthrough) {
-    /* Stage 4.3 起：实例化后默认 pag-file 为空 → passthrough=TRUE，
+    /* 实例化后默认 pag-file 为空 → passthrough=TRUE，
      * 等价于 identity。只有 pag-file 非空且 Engine::Make 成功时才会切到
      * 非 passthrough；本进程跑在 VM_IOT_ENABLE_LIBPAG=0 下，Engine 永远
      * 造不出来，因此 passthrough 是稳定可断言的初始状态。 */
@@ -130,7 +130,7 @@ TEST_F(PagFilterTest, LaunchPipelineReachesPaused) {
     gst_object_unref(pipe);
 }
 
-/* ────────── Stage 4.3：pag-file 属性 / 退化语义 ──────────
+/* ────────── pag-file 属性 / 退化语义 ──────────
  * 单测构建走 VM_IOT_ENABLE_LIBPAG=0，所以 Engine::Make 永远返 nullptr。
  * 这一组用例固定「pag-file 非空也必须退化为 passthrough」的契约，
  * 防止 4.4 热切换实现误把 stub 路径打通。 */
@@ -244,7 +244,7 @@ TEST_F(PagFilterTest, EmptyPagFileKeepsPassthroughThroughCaps) {
 TEST_F(PagFilterTest, NonEmptyPagFileFallsBackToPassthroughUnderStub) {
     /* VM_IOT_ENABLE_LIBPAG=0 下，pag_sdk::Engine::Make 永远返 nullptr。
      * 即使设了非空 pag-file，pagfilter 在 set_caps 中也必须退化为 passthrough，
-     * 整条管线仍能正常 PAUSED；这是 Stage 4.3 故意选择的"不报错只降级"语义。 */
+     * 整条管线仍能正常 PAUSED；这是故意选择的"不报错只降级"语义。 */
     GError* err = nullptr;
     GstElement* pipe = gst_parse_launch(
         "videotestsrc num-buffers=2 is-live=false "
@@ -286,7 +286,7 @@ TEST_F(PagFilterTest, NonEmptyPagFileFallsBackToPassthroughUnderStub) {
     gst_object_unref(pipe);
 }
 
-/* Stage 3：pag_sdk 抽象层 stub 分支验证。
+/* pag_sdk 抽象层 stub 分支验证。
  * 单测构建强制 VM_IOT_ENABLE_LIBPAG=0（见 tests/CMakeLists.txt），
  * 所以这里期望：
  *   - is_enabled() 返回 false；
@@ -303,7 +303,7 @@ TEST_F(PagFilterTest, PagSdkStubBehavior) {
     EXPECT_FALSE(pag_sdk::selftest_load("pag/PAG_LOGO.pag"));
 }
 
-/* ────────── Stage 5：属性接口契约（stub 分支）──────────
+/* ────────── 属性接口契约（stub 分支）──────────
  * 这一组用例在 VM_IOT_ENABLE_LIBPAG=0 下跑：Engine 永远造不出来，所以
  * 验证的只能是「属性可读可写、热切不崩、stub 路径不抛」。真正的渲染
  * 与图层替换效果在树莓派上用 gst_launch + Video.pag 做集成验证。 */
@@ -364,7 +364,7 @@ TEST_F(PagFilterTest, ReplaceImageIntProperties) {
 }
 
 TEST_F(PagFilterTest, HotSwapPagFileInPlayingDoesNotCrash) {
-    /* Stage 5 关键契约：PLAYING 状态下改 pag-file 不允许崩。
+    /* 关键契约：PLAYING 状态下改 pag-file 不允许崩。
      * stub 分支下 Engine::Make 永远失败，pagfilter 应：
      *   1) 把 pending 写好（不立刻 rebuild）；
      *   2) 下一帧 transform_ip 入口消费 pending → rebuild → engine 仍 null

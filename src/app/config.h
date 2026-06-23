@@ -20,7 +20,7 @@ struct ServerConfig {
 /*
  * 摄像头采集配置。
  *
- * 字段语义（自 Stage 3 起重新解释）：
+ * 字段语义：
  *   - width / height / framerate：用户「期望」参数，用于在启动期与设备
  *     真实能力做评分匹配（V4L2Prober + CapsRanker）；不再要求设备必须
  *     精确支持这套参数。
@@ -52,12 +52,13 @@ struct LogConfig {
 
 /* PAG 滤镜（自研 GStreamer 元素 pagfilter）的配置。
  *
- * 当前形态：enabled=true 时仅在 pipeline 中插入一个 passthrough 元素，
- *           不修改任何像素；selftest=true 时启动期一次性调用 libpag 加载
+ * 当前形态：enabled=true 时在 pipeline 中插入 pagfilter，并根据 file
+ *           加载 .pag 资产、alpha-blend 到主线画面（运行期亦可热切）；
+ *           file 为空时 pagfilter 仍在管线中，但退化为 passthrough，不修改像素。
+ *           selftest=true 时启动期一次性调用 libpag 加载
  *           file 指向的 .pag 文件并打印元信息，证明 SDK 编译/链接通。
  *           selftest 独立于 enabled，即使 enabled=false 也会执行，
  *           便于在不影响 pipeline 的情况下单独验证 SDK。
- *           Stage 4 起 pagfilter 才会真正渲染 .pag 到画面上。
  *
  * 默认 enabled=false，确保现网行为不变。 */
 struct PagFilterConfig {

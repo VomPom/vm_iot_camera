@@ -5,9 +5,9 @@ capture:
   device: /dev/video0
   # 以下三项是「期望参数」：启动期 V4L2Prober 探测设备真实能力后，
   # CapsRanker 会选出最接近的 (fmt,w,h,fps) 组合作为上游 caps。
-  width: 640
-  height: 480
-  framerate: 60
+  width: 1280
+  height: 720
+  framerate: 30
   # 下游统一格式：编码器输入的像素格式，pipeline 强制收敛到此格式。
   # 与上游解耦——无论摄像头给的是 MJPG 还是 YUY2，下游都拿到同一份。
   pixfmt: I420                         # I420 | YUY2 | NV12 ...
@@ -21,20 +21,20 @@ encoder:
 
 filter:
   enabled: true                       # 总开关：false 时 pipeline 不插入 GL 滤镜段
-  shader: effects.frag                # 单一着色器文件；相对路径以 config/../shaders 为基目录
+  shader: effects.frag                # 单一着色器文件；相对路径以 assets/shaders 为基目录
   filter_type: 0                      # 启动默认特效：0=passthrough 1=mosaic 2=invert
   max_type: 2                         # filter next 循环上限（含），与 shader 内 if 分支保持一致
   # PAG 自研滤镜段（自定义 GstElement: pagfilter）
   # enabled=true 时在 pipeline 插入一个 pagfilter 元素，按 file 加载 .pag 并
-  # 把渲染结果 alpha-blend 到主线 I420 上（Stage 4.3 起）。
-  # Stage 5 起，pagfilter 支持 PLAYING 状态热切：可通过 iotcamctl 在线改
+  # 把渲染结果 alpha-blend 到主线 I420 上。
+  # pagfilter 支持 PLAYING 状态热切：可通过 iotcamctl 在线改
   # pag-file / 文本图层 / 视频图层占位（详见 docs/task/libpag.md）。
   # selftest=true 时启动期一次性调用 libpag 加载 file 并打印元信息，
   # 用于验证 SDK 编译/链接通；独立于 enabled，不影响 pipeline。
   pag:
     enabled: true                     # 总开关；主分支随时可发布建议设为 false
     selftest: false                    # true 时启动期 libpag 自检（仅在编译开 -DVM_IOT_ENABLE_LIBPAG=ON 时真正调 libpag）
-    file: "pag/Video.pag"             # .pag 素材路径；Stage 5 默认用 Video.pag 演示文本/视频图层替换
+    file: "pag/PAG_LOGO.pag"             # .pag 素材路径；Stage 5 默认用 Video.pag 演示文本/视频图层替换
 
 control:
   request_fifo: /tmp/vm_iot.ctl       # 命令请求 FIFO；空串=不开启控制通道

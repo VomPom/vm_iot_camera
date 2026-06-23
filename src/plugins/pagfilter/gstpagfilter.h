@@ -4,15 +4,16 @@
 // @Description
 //   pagfilter：vm_iot 自研 GStreamer 滤镜元素。
 //
-//   Stage 4.3：接入 libpag 渲染。
-//     - 新增 GObject 属性 `pag-file` (string, NULL/READY 时可写)：
-//       为空字符串或 NULL 时元素保持 passthrough；非空时启动期在 set_caps
+//   能力要点：
+//     - GObject 属性 `pag-file` (string)：
+//       为空字符串或 NULL 时元素保持 passthrough；非空时在 set_caps
 //       中按 (width, height) 创建 pag_sdk::Engine，transform_ip 内每帧
 //       渲染 RGBA premul 帧并 alpha-blend 到 I420 buffer 上。
 //     - libpag 真集成时（VM_IOT_ENABLE_LIBPAG=ON）才真正渲染；
 //       VM_IOT_ENABLE_LIBPAG=OFF 时 Engine::Make 永远返 nullptr，
 //       元素自动退化回 passthrough（单测路径走这里）。
-//     - 热切换 / 运行时改 pag-file 留给 Stage 4.4。
+//     - 支持 PLAYING 状态热切：运行期改 pag-file / 文本图层 / image placeholder
+//       均通过 GObject 属性入队，由 streaming 线程下一帧消费。
 //
 
 #ifndef VM_IOT_GSTPAGFILTER_H
@@ -43,7 +44,7 @@ typedef struct _GstPagFilterClass GstPagFilterClass;
 struct _GstPagFilter {
     GstBaseTransform parent;
 
-    /* ─── 配置（由 GObject 属性写入；Stage 5 起 PLAYING 也可写）─── */
+    /* ─── 配置（由 GObject 属性写入；PLAYING 也可写）─── */
     gchar*           pag_file_path;     /* g_strdup 出来，finalize 中 g_free */
 
     /* ─── 协商后缓存（set_caps 写、transform_ip 读）─── */
@@ -57,7 +58,7 @@ struct _GstPagFilter {
     GstClockTime     stream_start_pts;  /* 首帧 PTS；GST_CLOCK_TIME_NONE 表示未定 */
     guint64          frame_counter;     /* PTS 不可用时的退化路径计数器 */
 
-    /* ─── Stage 5：热切 / 图层替换 队列 ───
+    /* ─── 热切 / 图层替换 队列 ───
      * 所有"控制线程发起、streaming 线程消费"的更新都走 pending_* 字段，
      * 由 engine_lock_ (GMutex*) 保护。streaming 线程每帧入口检查标志位、
      * 批量消费、清零。同步开销极小（无竞争路径下仅一次 mutex_trylock）。 */

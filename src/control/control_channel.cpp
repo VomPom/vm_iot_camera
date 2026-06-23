@@ -470,7 +470,7 @@ std::string ControlChannel::handle_status() const
     os << "record_enabled=false\n"
         "record_status=not_implemented\n";
 
-    /* 6) PAG 叠加副线（Stage 5）。 */
+    /* 6) PAG 叠加副线。 */
     if (pag_overlay_) {
         std::string body;
         pag_overlay_->format_status(body);
@@ -532,7 +532,7 @@ std::string ControlChannel::handle_record(const std::vector<std::string>& toks)
     return make_err(line, "record_not_implemented");
 }
 
-/* ──────────────────── Stage 5：PAG 命令族 ────────────────────
+/* ─────────────────── PAG 命令族 ────────────────────
  * 协议：
  *   pag get                            打印 attached/pag_file/replace_idx/replace_every
  *   pag set-file <abs_path>            热切 .pag 资源

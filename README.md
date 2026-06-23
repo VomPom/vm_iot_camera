@@ -39,7 +39,8 @@ without restarting the stream.
 - **Logging** via `spdlog`.
 - **Unit tests** with GoogleTest. CMake fetches it through
   `FetchContent`, so no system-wide install is needed.
-- The build symlinks `config/` and `shaders/` next to the executable.
+- The build symlinks `assets/` next to the executable, so the runtime
+  resources (`config/`, `pag/`, `shaders/`) sit beside the binary.
   Editing those files and restarting the binary is enough; you don't
   need to rebuild.
 
@@ -50,10 +51,12 @@ without restarting the stream.
 ```
 vm_iot/
 ├── CMakeLists.txt              # Top-level build script
-├── config/
-│   └── default.yaml            # Default runtime configuration
-├── shaders/
-│   └── effects.frag            # GL fragment shader; holds all filter variants
+├── assets/                     # Runtime resources (single symlink target)
+│   ├── config/
+│   │   └── default.yaml        # Default runtime configuration
+│   ├── pag/                    # .pag assets consumed by pagfilter / selftest
+│   └── shaders/
+│       └── effects.frag        # GL fragment shader; holds all filter variants
 ├── docs/
 │   └── gstreamer/              # Per-element notes for every gst element used
 ├── scripts/
@@ -72,13 +75,13 @@ vm_iot/
 │   ├── util/                   # V4L2Prober, CapsRanker
 │   └── cli/
 │       └── iotcamctl.cpp       # vm_iot_ctl source (no business logic, just protocol)
-├── tools/
-│   └── probe_dev.cpp           # Standalone V4L2 capability dump (probe_dev binary)
-└── tests/                      # GoogleTest-based unit tests
+└── tests/                      # GoogleTest-based unit tests + developer helpers
     ├── test_config.cpp
     ├── test_caps_ranker.cpp
     ├── test_pipeline_builder.cpp
     ├── test_v4l2_prober.cpp
+    ├── tools/
+    │   └── probe_dev.cpp       # Standalone V4L2 capability dump (probe_dev binary)
     └── demo/simple_v4l2_grap.c
 ```
 
@@ -128,7 +131,7 @@ The build produces three binaries:
 |--------------|------------------------------|-----------------------------------------------------------|
 | `vm_iot`     | `src/` (everything but `src/cli`) | The RTSP daemon.                                     |
 | `vm_iot_ctl` | `src/cli/iotcamctl.cpp`      | Thin client. Talks to the daemon over FIFOs.              |
-| `probe_dev`  | `tools/probe_dev.cpp`        | Stand-alone V4L2 capability dump; useful for cross-checks against `v4l2-ctl --list-formats-ext`. |
+| `probe_dev`  | `tests/tools/probe_dev.cpp`  | Stand-alone V4L2 capability dump; useful for cross-checks against `v4l2-ctl --list-formats-ext`. |
 
 After the build:
 
@@ -137,8 +140,7 @@ build/
 ├── vm_iot
 ├── vm_iot_ctl
 ├── probe_dev
-├── config  -> ../config     # symlink
-└── shaders -> ../shaders    # symlink
+└── assets -> ../assets      # single symlink covers config/ pag/ shaders/
 ```
 
 `make install` (or the install step of CPack) copies `vm_iot` and
@@ -156,8 +158,8 @@ cmake -S . -B build -DBUILD_TESTING=OFF
 ## Run
 
 ```bash
-./build/vm_iot                                # Uses config/default.yaml
-./build/vm_iot -c config/default.yaml         # Explicit config file
+./build/vm_iot                                # Uses assets/config/default.yaml
+./build/vm_iot -c assets/config/default.yaml  # Explicit config file
 ./build/vm_iot --port 8555 --bitrate 6000     # CLI overrides
 ```
 
@@ -186,7 +188,7 @@ ffplay rtsp://127.0.0.1:8554/live
 
 ## Configuration
 
-[config/default.yaml](config/default.yaml):
+[assets/config/default.yaml](assets/config/default.yaml):
 
 ```yaml
 server:
@@ -209,7 +211,7 @@ encoder:
   bframes: 0              # only honored by x264; ignored by openh264 / x265
 filter:
   enabled: true                   # false = no GL filter stage in the pipeline
-  shader: effects.frag            # path is resolved relative to shaders/
+  shader: effects.frag            # path is resolved relative to assets/shaders/
   filter_type: 0                  # startup variant: 0=passthrough 1=mosaic 2=invert
   max_type: 2                     # upper bound for `filter next` cycling
 control:
@@ -238,8 +240,9 @@ Override priority: `CLI > YAML > built-in defaults`.
 
 ### Hot reload
 
-The build creates symlinks from `build/config` to `config/` and from
-`build/shaders` to `shaders/`. Edit any file under those directories
+The build creates a single symlink from `build/assets` to `assets/`,
+so `build/assets/config`, `build/assets/pag`, and `build/assets/shaders`
+are all live views into the repo. Edit any file under those directories
 and restart the process; the new values are picked up without a
 rebuild. For shader-only edits, you can skip the restart and run
 `vm_iot_ctl reload` instead.
@@ -313,7 +316,7 @@ libstdc++.
 
 The two FIFO paths must match the daemon's `control.request_fifo` and
 `control.reply_fifo` config entries. If you change those in
-`config/default.yaml`, point `vm_iot_ctl` at them with `--ctl` /
+`assets/config/default.yaml`, point `vm_iot_ctl` at them with `--ctl` /
 `--reply` or by exporting `IOTCAM_CTL` / `IOTCAM_REPLY`.
 
 ### Exit codes
@@ -416,9 +419,9 @@ added there.
 
 ## Troubleshooting
 
-- `load config failed: bad file: config/default.yaml` — run the binary
-  from a directory that contains `config/`, or pass an explicit path
-  with `-c`. After a normal `cmake --build`, running from `build/`
+- `load config failed: bad file: assets/config/default.yaml` — run the
+  binary from a directory that contains `assets/`, or pass an explicit
+  path with `-c`. After a normal `cmake --build`, running from `build/`
   works because of the symlink.
 - `gst_rtsp_server_attach failed (port 8554 in use?)` — another process
   is bound to the same port; change `server.port` or pass `--port`.
