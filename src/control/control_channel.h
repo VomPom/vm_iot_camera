@@ -90,6 +90,7 @@
 class ShaderFilter;
 class RtspServer;
 class Snapshot;
+class PagOverlay;
 struct Config;
 
 class ControlChannel {
@@ -97,6 +98,8 @@ public:
     /* 启动控制通道。
      *   req_path / reply_path 为空串时分别表示"不开请求 FIFO"/"不写回执"。
      *   filter / cfg / server / snapshot 必须在 ControlChannel 生命周期内保持存活。
+     *   pag_overlay 可为 nullptr（filter.pag.enabled=false 时）；非空时启用
+     *   `pag set-*` 命令族（Stage 5）。
      *   start_time 用于 status 命令计算 uptime；通常传 main 启动时记录的 steady_clock::now()。
      * 失败返回 false（mkfifo / open 错误）；成功后 source 已挂到默认 GMainContext。 */
     bool start(const std::string& req_path,
@@ -105,6 +108,7 @@ public:
                const Config*      cfg,
                const RtspServer*  server,
                Snapshot*          snapshot,
+               PagOverlay*        pag_overlay,
                // TODO(record): 重开录像时在此恢复 Record* record 参数
                std::chrono::steady_clock::time_point start_time);
     void stop();
@@ -129,6 +133,10 @@ private:
     std::string handle_status() const;
     std::string handle_snapshot(const std::vector<std::string>& toks) const;
     std::string handle_record(const std::vector<std::string>& toks);
+    /* Stage 5：PAG 命令族（set-file / set-text / set-replace-image / get）。
+     * 与上面命令一样：原始命令行已 trim/split，本函数负责再 join 出回执的 cmd 部分。
+     * pag_overlay_ 为 nullptr 时所有子命令统一返 "pag_disabled"。 */
+    std::string handle_pag(const std::vector<std::string>& toks);
 
     /* 工具：构造 "ok <line>\n<body>.\n" / "err <line> <reason>\n.\n"。 */
     static std::string make_ok(const std::string& cmd_line, const std::string& body);
@@ -140,6 +148,7 @@ private:
     const Config* cfg_     = nullptr;
     const RtspServer* server_ = nullptr;
     Snapshot*     snapshot_ = nullptr;
+    PagOverlay*   pag_overlay_ = nullptr;
     std::chrono::steady_clock::time_point start_time_{};
 
     GIOChannel*   channel_ = nullptr;

@@ -204,6 +204,78 @@ bool Engine::render_frame_rgba(double progress01,
     return true;
 }
 
+/* ─────────────────── Stage 5：图层替换实现（真分支） ─────────────────── */
+
+int Engine::num_texts() const {
+    if (!impl_ || !impl_->file) return 0;
+    return impl_->file->numTexts();
+}
+
+int Engine::num_images() const {
+    if (!impl_ || !impl_->file) return 0;
+    return impl_->file->numImages();
+}
+
+bool Engine::replace_text(int idx, const std::string& utf8) {
+    if (!impl_ || !impl_->file) return false;
+    const int n = impl_->file->numTexts();
+    if (idx < 0 || idx >= n) {
+        LOGW("pag_sdk::Engine::replace_text: idx={} out of range [0,{})", idx, n);
+        return false;
+    }
+    /* getTextData 返回 std::shared_ptr<TextDocument>；按官方示例只改 text
+     * 字段，其它字体/字号/颜色保留素材原设。NULL 表示该图层不可编辑
+     * （理论上 idx 在 [0,numTexts) 内不会返 NULL，但保留兜底）。 */
+    auto td = impl_->file->getTextData(idx);
+    if (!td) {
+        LOGW("pag_sdk::Engine::replace_text: getTextData({}) returned null", idx);
+        return false;
+    }
+    td->text = utf8;
+    impl_->file->replaceText(idx, td);
+    return true;
+}
+
+bool Engine::replace_image_from_rgba(int          idx,
+                                     const void*  rgba_data,
+                                     int          width,
+                                     int          height,
+                                     size_t       row_bytes) {
+    if (!impl_ || !impl_->file) return false;
+    if (!rgba_data || width <= 0 || height <= 0) {
+        LOGW("pag_sdk::Engine::replace_image_from_rgba: invalid pixel desc "
+             "({}x{}, data={})",
+             width, height, rgba_data ? "ok" : "null");
+        return false;
+    }
+    if (row_bytes < static_cast<size_t>(width) * 4u) {
+        LOGW("pag_sdk::Engine::replace_image_from_rgba: row_bytes={} < {}",
+             row_bytes, static_cast<size_t>(width) * 4u);
+        return false;
+    }
+    const int n = impl_->file->numImages();
+    if (idx < 0 || idx >= n) {
+        LOGW("pag_sdk::Engine::replace_image_from_rgba: idx={} out of range [0,{})",
+             idx, n);
+        return false;
+    }
+    /* PAGImage::FromPixels 会复制一份像素，调用返回后 rgba_data 可立即重用。
+     * AlphaType 选 Opaque：摄像头帧没有 alpha 概念，PAG 内部按图层 mask
+     * 处理透明，不要在这里多此一举传 Premultiplied。 */
+    auto img = pag::PAGImage::FromPixels(
+        static_cast<const uint8_t*>(rgba_data),
+        width, height,
+        static_cast<size_t>(row_bytes),
+        pag::ColorType::RGBA_8888,
+        pag::AlphaType::Opaque);
+    if (!img) {
+        LOGW("pag_sdk::Engine::replace_image_from_rgba: FromPixels failed");
+        return false;
+    }
+    impl_->file->replaceImage(idx, img);
+    return true;
+}
+
 #else  /* VM_IOT_ENABLE_LIBPAG == 0 ─ stub 分支：Engine 永远造不出来 */
 
 /* Impl 仍然要有定义，否则 unique_ptr<Impl> 析构在 .cpp 里无法实例化。
@@ -233,6 +305,15 @@ int     Engine::surface_height()  const { return 0; }
 bool Engine::render_frame_rgba(double, void*, size_t) {
     /* stub 分支永远造不出 Engine 对象——这里被调用说明逻辑出错，
      * 但仍保持「不抛、返回 false」的契约。 */
+    return false;
+}
+
+/* Stage 5 stub：Engine 在 stub 分支根本不会被构造，但保留符号定义
+ * 避免单测/上层在编译期 reference 缺失。 */
+int  Engine::num_texts()  const { return 0; }
+int  Engine::num_images() const { return 0; }
+bool Engine::replace_text(int, const std::string&) { return false; }
+bool Engine::replace_image_from_rgba(int, const void*, int, int, size_t) {
     return false;
 }
 

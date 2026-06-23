@@ -42,3 +42,101 @@ bool PagOverlay::on_attached_locked() {
     LOGI("pag_overlay: injected pag-file='{}' into pag0", pag_file_path_);
     return true;
 }
+
+/* ───────────────────── Stage 5：运行时热控实现 ───────────────────── */
+
+bool PagOverlay::set_pag_file(const std::string& abs_path, std::string& err) {
+    std::lock_guard<std::mutex> lk(mu_);
+    GstElement* pag0 = element("pag0");
+    if (!pag0) {
+        err = "not_attached";
+        return false;
+    }
+    /* pagfilter 已支持 GST_PARAM_MUTABLE_PLAYING；PLAYING 状态下变更会被
+     * 内部排队到 streaming 线程下一帧消费。 */
+    g_object_set(pag0, "pag-file", abs_path.c_str(), nullptr);
+    pag_file_path_ = abs_path;
+    LOGI("pag_overlay: hot-set pag-file='{}'", abs_path);
+    return true;
+}
+
+bool PagOverlay::set_text(int idx, const std::string& utf8, std::string& err) {
+    std::lock_guard<std::mutex> lk(mu_);
+    GstElement* pag0 = element("pag0");
+    if (!pag0) {
+        err = "not_attached";
+        return false;
+    }
+    if (idx < 0) {
+        err = "invalid_idx";
+        return false;
+    }
+    /* pag-text 协议："<idx>:<utf8>"，utf8 中允许出现冒号/空格（pagfilter 内部
+     * 用 strchr 找首个冒号定位 idx，剩余 raw 全部当 utf8）。 */
+    std::string combined = std::to_string(idx) + ":" + utf8;
+    g_object_set(pag0, "pag-text", combined.c_str(), nullptr);
+    LOGI("pag_overlay: hot-set pag-text idx={} len={}", idx, utf8.size());
+    return true;
+}
+
+bool PagOverlay::set_replace_image_idx(int idx, std::string& err) {
+    std::lock_guard<std::mutex> lk(mu_);
+    GstElement* pag0 = element("pag0");
+    if (!pag0) {
+        err = "not_attached";
+        return false;
+    }
+    g_object_set(pag0, "pag-replace-image-idx", idx, nullptr);
+    LOGI("pag_overlay: hot-set pag-replace-image-idx={}", idx);
+    return true;
+}
+
+bool PagOverlay::set_replace_image_every(int every, std::string& err) {
+    std::lock_guard<std::mutex> lk(mu_);
+    GstElement* pag0 = element("pag0");
+    if (!pag0) {
+        err = "not_attached";
+        return false;
+    }
+    if (every < 1) {
+        err = "invalid_every";
+        return false;
+    }
+    g_object_set(pag0, "pag-replace-image-every", every, nullptr);
+    LOGI("pag_overlay: hot-set pag-replace-image-every={}", every);
+    return true;
+}
+
+PagOverlay::StatusSnapshot PagOverlay::snapshot() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    StatusSnapshot s;
+    /* element() 不增 ref，但我们在持锁期间访问，BranchBase 保证元素引用
+     * 在 detach_locked_ 之前一直有效。 */
+    GstElement* pag0 = const_cast<PagOverlay*>(this)->element("pag0");
+    if (!pag0) {
+        s.attached = false;
+        return s;
+    }
+    s.attached = true;
+    gchar* path = nullptr;
+    g_object_get(pag0,
+                 "pag-file",                  &path,
+                 "pag-replace-image-idx",     &s.replace_idx,
+                 "pag-replace-image-every",   &s.replace_every,
+                 nullptr);
+    if (path) {
+        s.pag_file = path;
+        g_free(path);
+    }
+    return s;
+}
+
+void PagOverlay::format_status(std::string& out) const {
+    auto s = snapshot();
+    out.append("pag_attached=").append(s.attached ? "true" : "false").append("\n");
+    if (s.attached) {
+        out.append("pag_file=").append(s.pag_file).append("\n");
+        out.append("pag_replace_idx=").append(std::to_string(s.replace_idx)).append("\n");
+        out.append("pag_replace_every=").append(std::to_string(s.replace_every)).append("\n");
+    }
+}

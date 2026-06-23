@@ -43,19 +43,41 @@ typedef struct _GstPagFilterClass GstPagFilterClass;
 struct _GstPagFilter {
     GstBaseTransform parent;
 
-    /* ─── 配置（由 pag-file 属性写入，NULL/READY 时合法）─── */
+    /* ─── 配置（由 GObject 属性写入；Stage 5 起 PLAYING 也可写）─── */
     gchar*           pag_file_path;     /* g_strdup 出来，finalize 中 g_free */
 
-    /* ─── 协商后缓存（set_caps 写、transform_ip 读，单线程）─── */
+    /* ─── 协商后缓存（set_caps 写、transform_ip 读）─── */
     GstVideoInfo*    in_info;           /* new/delete；NULL 表示尚未协商 */
 
-    /* ─── 渲染状态（仅 streaming 线程访问）─── */
+    /* ─── 渲染状态（仅 streaming 线程访问；属性写入侧靠 engine_lock_ 保护）─── */
     void*            engine;            /* pag_sdk::Engine*；NULL 表示 passthrough */
     void*            rgba_buf;          /* std::vector<uint8_t>*；engine 命中时分配 */
 
     /* ─── PTS → progress 推进 ─── */
     GstClockTime     stream_start_pts;  /* 首帧 PTS；GST_CLOCK_TIME_NONE 表示未定 */
     guint64          frame_counter;     /* PTS 不可用时的退化路径计数器 */
+
+    /* ─── Stage 5：热切 / 图层替换 队列 ───
+     * 所有"控制线程发起、streaming 线程消费"的更新都走 pending_* 字段，
+     * 由 engine_lock_ (GMutex*) 保护。streaming 线程每帧入口检查标志位、
+     * 批量消费、清零。同步开销极小（无竞争路径下仅一次 mutex_trylock）。 */
+    void*            engine_lock;       /* GMutex*；init 时分配，finalize 释放 */
+
+    /* pag-file 热切：pending_pag_file 非空时 streaming 线程会按它重建 Engine。 */
+    gboolean         reload_pending;
+    gchar*           pending_pag_file;  /* g_strdup；消费后 g_free 并置 NULL */
+
+    /* pag-text 热切：text_idx>=0 时 streaming 线程下一帧 replace_text。 */
+    gint             pending_text_idx;
+    gchar*           pending_text_utf8; /* g_strdup；消费后 g_free 并置 NULL */
+    gboolean         text_pending;
+
+    /* pag-replace-image：把当前 I420 帧转 RGBA 灌进第 N 个 image placeholder。
+     * idx<0 → 不替换；every>=1 → 每 every 帧才替换一次（节流），减少
+     * libpag 内部纹理重建开销。 */
+    gint             replace_image_idx;
+    gint             replace_image_every;
+    guint64          replace_image_counter; /* 模 every 推进 */
 };
 
 struct _GstPagFilterClass {

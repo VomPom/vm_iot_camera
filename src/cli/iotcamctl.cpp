@@ -64,6 +64,11 @@ void print_help() {
         "  reload            reload shader file from disk\n"
         "  status            print runtime status (uptime, clients, encoder...)\n"
         "  snapshot [PATH]   capture one JPEG frame; PATH optional (daemon picks if empty)\n"
+        "  pag get                          print PAG overlay status\n"
+        "  pag set-file <ABS>               hot-swap PAG asset (absolute path)\n"
+        "  pag set-text <IDX> <UTF8...>     replace text layer IDX with UTF8 string\n"
+        "  pag set-replace-image <IDX>      enable picture-in-picture into layer IDX (-1 off)\n"
+        "  pag set-replace-image-every <N>  throttle interval (>=1, default 2)\n"
         "  raw \"<line>\"      send a raw protocol line (advanced)\n"
         "\n"
         "GLOBAL OPTIONS:\n"
@@ -240,6 +245,61 @@ std::string build_request(const std::vector<std::string>& pos) {
             s += pos[i];
         }
         return s;
+    }
+
+    if (cmd == "pag") {
+        if (pos.size() < 2) {
+            std::fprintf(stderr,
+                         "iotcamctl: 'pag' requires a subcommand "
+                         "(get | set-file | set-text | set-replace-image | "
+                         "set-replace-image-every)\n");
+            std::exit(2);
+        }
+        const std::string& sub = pos[1];
+
+        if (sub == "get") {
+            if (pos.size() != 2) {
+                std::fprintf(stderr, "iotcamctl: 'pag get' takes no argument\n");
+                std::exit(2);
+            }
+            return "pag get";
+        }
+        if (sub == "set-file") {
+            if (pos.size() != 3) {
+                std::fprintf(stderr, "iotcamctl: 'pag set-file' requires PATH\n");
+                std::exit(2);
+            }
+            return "pag set-file " + pos[2];
+        }
+        if (sub == "set-text") {
+            if (pos.size() < 4) {
+                std::fprintf(stderr,
+                             "iotcamctl: 'pag set-text' requires IDX and UTF8 text\n");
+                std::exit(2);
+            }
+            std::string s = "pag set-text " + pos[2];
+            for (size_t i = 3; i < pos.size(); ++i) {
+                s += ' ';
+                s += pos[i];
+            }
+            return s;
+        }
+        if (sub == "set-replace-image") {
+            if (pos.size() != 3) {
+                std::fprintf(stderr, "iotcamctl: 'pag set-replace-image' requires IDX\n");
+                std::exit(2);
+            }
+            return "pag set-replace-image " + pos[2];
+        }
+        if (sub == "set-replace-image-every") {
+            if (pos.size() != 3) {
+                std::fprintf(stderr, "iotcamctl: 'pag set-replace-image-every' requires N\n");
+                std::exit(2);
+            }
+            return "pag set-replace-image-every " + pos[2];
+        }
+        std::fprintf(stderr, "iotcamctl: unknown pag subcommand '%s'\n", sub.c_str());
+        std::exit(2);
     }
 
     std::fprintf(stderr, "iotcamctl: unknown command '%s' (try --help)\n", cmd.c_str());

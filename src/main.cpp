@@ -184,6 +184,7 @@ int main(int argc, char** argv) {
                &cfg,
                &server,
                &snapshot,
+               cfg.filter.pag.enabled ? &pag_overlay : nullptr,
                start_time);
 
     g_main_loop_run(loop);             // 阻塞，SIGINT/SIGTERM 退出

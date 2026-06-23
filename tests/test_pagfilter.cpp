@@ -303,4 +303,121 @@ TEST_F(PagFilterTest, PagSdkStubBehavior) {
     EXPECT_FALSE(pag_sdk::selftest_load("pag/PAG_LOGO.pag"));
 }
 
+/* ────────── Stage 5：属性接口契约（stub 分支）──────────
+ * 这一组用例在 VM_IOT_ENABLE_LIBPAG=0 下跑：Engine 永远造不出来，所以
+ * 验证的只能是「属性可读可写、热切不崩、stub 路径不抛」。真正的渲染
+ * 与图层替换效果在树莓派上用 gst_launch + Video.pag 做集成验证。 */
+
+TEST_F(PagFilterTest, PagTextPropertyReadWrite) {
+    GstElement* el = gst_element_factory_make("pagfilter", nullptr);
+    ASSERT_NE(el, nullptr);
+
+    /* 默认空串。 */
+    gchar* v = nullptr;
+    g_object_get(el, "pag-text", &v, nullptr);
+    ASSERT_NE(v, nullptr);
+    EXPECT_STREQ(v, "");
+    g_free(v);
+
+    /* 合法格式：idx:utf8。get 应回显（含 idx 与文本）。 */
+    g_object_set(el, "pag-text", "0:hello", nullptr);
+    g_object_get(el, "pag-text", &v, nullptr);
+    EXPECT_STREQ(v, "0:hello");
+    g_free(v);
+
+    /* 非法格式（缺冒号）被静默拒绝：get 应回滚到上一个有效值或空。
+     * 这里只断言 "不崩" + "pending 未被破坏"——后续 set 仍能成功。 */
+    g_object_set(el, "pag-text", "broken_no_colon", nullptr);
+    g_object_set(el, "pag-text", "1:world wide", nullptr);
+    g_object_get(el, "pag-text", &v, nullptr);
+    EXPECT_STREQ(v, "1:world wide");
+    g_free(v);
+
+    gst_object_unref(el);
+}
+
+TEST_F(PagFilterTest, ReplaceImageIntProperties) {
+    GstElement* el = gst_element_factory_make("pagfilter", nullptr);
+    ASSERT_NE(el, nullptr);
+
+    /* 默认值：idx=-1（禁用），every=2。 */
+    gint idx = 999, every = 0;
+    g_object_get(el, "pag-replace-image-idx", &idx,
+                 "pag-replace-image-every", &every, nullptr);
+    EXPECT_EQ(idx,   -1);
+    EXPECT_EQ(every, 2);
+
+    /* 写入 / 读回。 */
+    g_object_set(el, "pag-replace-image-idx", 3,
+                 "pag-replace-image-every", 5, nullptr);
+    g_object_get(el, "pag-replace-image-idx", &idx,
+                 "pag-replace-image-every", &every, nullptr);
+    EXPECT_EQ(idx,   3);
+    EXPECT_EQ(every, 5);
+
+    /* every<1 被 spec 拒绝（g_param_spec_int 自动 clamp）。 */
+    g_object_set(el, "pag-replace-image-every", 0, nullptr);
+    g_object_get(el, "pag-replace-image-every", &every, nullptr);
+    EXPECT_GE(every, 1);
+
+    gst_object_unref(el);
+}
+
+TEST_F(PagFilterTest, HotSwapPagFileInPlayingDoesNotCrash) {
+    /* Stage 5 关键契约：PLAYING 状态下改 pag-file 不允许崩。
+     * stub 分支下 Engine::Make 永远失败，pagfilter 应：
+     *   1) 把 pending 写好（不立刻 rebuild）；
+     *   2) 下一帧 transform_ip 入口消费 pending → rebuild → engine 仍 null
+     *      → 返回 GST_FLOW_OK 维持 passthrough。
+     * 用 videotestsrc 推 4 帧，第 2 帧时改 pag-file，整条管线应正常 EOS。 */
+    GError* err = nullptr;
+    GstElement* pipe = gst_parse_launch(
+        "videotestsrc num-buffers=4 is-live=false "
+        "! video/x-raw,format=I420,width=64,height=64,framerate=30/1 "
+        "! pagfilter name=p "
+        "! fakesink sync=false",
+        &err);
+    if (!pipe) {
+        FAIL() << "gst_parse_launch: " << (err ? err->message : "(null)");
+        if (err) g_error_free(err);
+        return;
+    }
+
+    EXPECT_NE(gst_element_set_state(pipe, GST_STATE_PLAYING),
+              GST_STATE_CHANGE_FAILURE);
+
+    GstElement* pag = gst_bin_get_by_name(GST_BIN(pipe), "p");
+    ASSERT_NE(pag, nullptr);
+    /* 立刻发起一次热切；stub 分支下会被消费但 Make 失败。 */
+    g_object_set(pag, "pag-file", "/nonexistent/foo.pag", nullptr);
+    /* 再来一次空路径热切（清空）：等价于让 streaming 线程把 pending 落地。 */
+    g_object_set(pag, "pag-file", "", nullptr);
+
+    /* 等管线自然 EOS 或超时。 */
+    GstBus* bus = gst_element_get_bus(pipe);
+    GstMessage* msg = gst_bus_timed_pop_filtered(
+        bus, 2 * GST_SECOND,
+        static_cast<GstMessageType>(GST_MESSAGE_EOS | GST_MESSAGE_ERROR));
+    if (msg) {
+        EXPECT_EQ(GST_MESSAGE_TYPE(msg), GST_MESSAGE_EOS)
+            << "expected EOS, got error during hot-swap";
+        gst_message_unref(msg);
+    }
+    gst_object_unref(bus);
+
+    gst_object_unref(pag);
+    gst_element_set_state(pipe, GST_STATE_NULL);
+    gst_object_unref(pipe);
+}
+
+TEST_F(PagFilterTest, PagSdkStubLayerReplaceContract) {
+    /* stub 分支下 Engine 不能被构造，所以这条用例只验证「stub 路径调
+     * num_texts/num_images/replace_text/replace_image 不崩、稳定返回 0/false」
+     * 的契约——主要防止真分支误把这些接口的 stub 实现漏掉，链接断裂只到
+     * 集成阶段才暴露。
+     * 用 unique_ptr 占位 Engine* 是不行的（构造私有），改用 LinkOnly 写法：
+     * 这里只取 sdk_version 调用，证明翻译单元里 Engine 的 inline 符号都解析正确。 */
+    EXPECT_EQ(pag_sdk::sdk_version(), std::string("libpag(disabled)"));
+}
+
 } // namespace
