@@ -8,7 +8,8 @@
 #include "shader_filter.h"
 #include "rtsp_server.h"
 #include "snapshot.h"
-#include "pag_overlay.h"
+#include "pag_branch.h"
+#include "pag_effect.h"
 #include "config.h"
 #include "log.h"
 #include <filesystem>
@@ -48,14 +49,14 @@ bool ControlChannel::start(const std::string& req_path,
                            const Config* cfg,
                            const RtspServer* server,
                            Snapshot* snapshot,
-                           PagOverlay* pag_overlay,
+                           PagBranch* pag_branch,
                            std::chrono::steady_clock::time_point start_time)
 {
     filter_ = filter;
     cfg_ = cfg;
     server_ = server;
     snapshot_ = snapshot;
-    pag_overlay_ = pag_overlay;
+    pag_branch_ = pag_branch;
     start_time_ = start_time;
 
     /* 1) 请求 FIFO（必须有 filter，否则 ShaderFilter 命令无意义；但不强求 server/cfg）。 */
@@ -199,7 +200,7 @@ void ControlChannel::stop()
     cfg_ = nullptr;
     server_ = nullptr;
     snapshot_ = nullptr;
-    pag_overlay_ = nullptr;
+    pag_branch_ = nullptr;
 }
 
 gboolean ControlChannel::on_readable(GIOChannel* src, GIOCondition cond, gpointer user)
@@ -470,10 +471,10 @@ std::string ControlChannel::handle_status() const
     os << "record_enabled=false\n"
         "record_status=not_implemented\n";
 
-    /* 6) PAG 叠加副线。 */
-    if (pag_overlay_) {
+    /* 6) PAG 副线。 */
+    if (pag_branch_) {
         std::string body;
-        pag_overlay_->format_status(body);
+        pag_branch_->format_status(body);
         os << body;
     } else {
         os << "pag_enabled=false\n";
@@ -540,7 +541,7 @@ std::string ControlChannel::handle_record(const std::vector<std::string>& toks)
  *   pag set-replace-image <idx>        启用/禁用画中画替换；-1 = 禁用
  *   pag set-replace-image-every <n>    节流间隔（>=1）
  * 路径相关命令（set-file）若传入相对路径，按 cfg.config_dir/.. 解析为绝对，
- * 与 selftest / pag_overlay::configure 的解析规则保持一致。 */
+ * 与 selftest / pag_branch::configure 的解析规则保持一致。 */
 std::string ControlChannel::handle_pag(const std::vector<std::string>& toks)
 {
     /* 还原命令行用于 reply 回显（保留所有原 token 包括空格分隔）。 */
@@ -551,7 +552,7 @@ std::string ControlChannel::handle_pag(const std::vector<std::string>& toks)
         line += toks[i];
     }
 
-    if (!pag_overlay_)
+    if (!pag_branch_)
     {
         return make_err(line, "pag_disabled");
     }
@@ -564,9 +565,10 @@ std::string ControlChannel::handle_pag(const std::vector<std::string>& toks)
 
     if (sub == "get")
     {
-        auto s = pag_overlay_->snapshot();
+        auto s = pag_branch_->snapshot();
         std::string body;
         body.append("attached=").append(s.attached ? "true" : "false").append("\n");
+        body.append("type=").append(s.type).append("\n");
         body.append("pag_file=").append(s.pag_file).append("\n");
         body.append("replace_idx=").append(std::to_string(s.replace_idx)).append("\n");
         body.append("replace_every=").append(std::to_string(s.replace_every)).append("\n");
@@ -592,7 +594,7 @@ std::string ControlChannel::handle_pag(const std::vector<std::string>& toks)
                        .lexically_normal().string();
         }
         std::string err;
-        bool ok = pag_overlay_->set_pag_file(path, err);
+        bool ok = pag_branch_->set_pag_file(path, err);
         return ok ? make_ok(line, "path=" + path)
                   : make_err(line, err.empty() ? "apply_failed" : err);
     }
@@ -615,7 +617,7 @@ std::string ControlChannel::handle_pag(const std::vector<std::string>& toks)
             utf8 += toks[i];
         }
         std::string err;
-        bool ok = pag_overlay_->set_text(idx, utf8, err);
+        bool ok = pag_branch_->set_text(idx, utf8, err);
         return ok ? make_ok(line, "idx=" + std::to_string(idx))
                   : make_err(line, err.empty() ? "apply_failed" : err);
     }
@@ -629,8 +631,16 @@ std::string ControlChannel::handle_pag(const std::vector<std::string>& toks)
         int idx;
         try { idx = std::stoi(toks[2]); }
         catch (...) { return make_err(line, "invalid_idx"); }
+        /* 严格路由：该子命令仅 PagEffect 类型可用。
+         * sticker 实例上调用会返 not_supported_in_sticker，
+         * 上层脱响应 dynamic_cast 失败详细原因。 */
+        auto* eff = dynamic_cast<PagEffect*>(pag_branch_);
+        if (!eff)
+        {
+            return make_err(line, "not_supported_in_sticker");
+        }
         std::string err;
-        bool ok = pag_overlay_->set_replace_image_idx(idx, err);
+        bool ok = eff->set_replace_image_idx(idx, err);
         return ok ? make_ok(line, "idx=" + std::to_string(idx))
                   : make_err(line, err.empty() ? "apply_failed" : err);
     }
@@ -644,8 +654,13 @@ std::string ControlChannel::handle_pag(const std::vector<std::string>& toks)
         int every;
         try { every = std::stoi(toks[2]); }
         catch (...) { return make_err(line, "invalid_value"); }
+        auto* eff = dynamic_cast<PagEffect*>(pag_branch_);
+        if (!eff)
+        {
+            return make_err(line, "not_supported_in_sticker");
+        }
         std::string err;
-        bool ok = pag_overlay_->set_replace_image_every(every, err);
+        bool ok = eff->set_replace_image_every(every, err);
         return ok ? make_ok(line, "every=" + std::to_string(every))
                   : make_err(line, err.empty() ? "apply_failed" : err);
     }

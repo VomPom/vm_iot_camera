@@ -79,6 +79,27 @@ struct _GstPagFilter {
     gint             replace_image_idx;
     gint             replace_image_every;
     guint64          replace_image_counter; /* 模 every 推进 */
+
+    /* ─── 业务分路（type）与几何参数 ───
+     *
+     * type：sticker | pageffect。Sticker 走现有渲染+blend 路径；PagEffect
+     *       是"视频替换轨道"占坑分支，transform_ip 顶部 passthrough+一次性 WARN。
+     *       属性 flag = MUTABLE_READY：不允许 PLAYING 状态切，避免运行期
+     *       重组渲染拓扑。
+     *
+     * pos_x / pos_y：sticker 模式下，PAG 画布中心对齐到画面归一化坐标。
+     *                (0,0) 左上，(1,1) 右下。属性 flag = MUTABLE_PLAYING。
+     *
+     * pag_scale：sticker 模式下，PAG 渲染结果在 blend 前的等比缩放。
+     *            1.0=与画面同尺寸；< 1.0 缩小；> 1.0 放大并自动裁剪。
+     *            属性 flag = MUTABLE_PLAYING。
+     *
+     * 全部受 engine_lock 保护——属性 setter 写入、transform_ip 入口快照读取。 */
+    gint             type;          /* 0=Sticker, 1=PagEffect；存 int 便于 g_value_get_int 兼容 */
+    gfloat           pos_x;
+    gfloat           pos_y;
+    gfloat           pag_scale;
+    gboolean         pageffect_warned; /* 仅在 PagEffect 模式下打一次 WARN，再往后静默 */
 };
 
 struct _GstPagFilterClass {

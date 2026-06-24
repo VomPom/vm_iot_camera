@@ -35,6 +35,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 GST_DEBUG_CATEGORY_STATIC(gst_pagfilter_debug);
 #define GST_CAT_DEFAULT gst_pagfilter_debug
@@ -65,7 +66,28 @@ enum {
     PROP_PAG_TEXT,
     PROP_REPLACE_IMAGE_IDX,
     PROP_REPLACE_IMAGE_EVERY,
+    PROP_PAG_TYPE,
+    PROP_PAG_POS_X,
+    PROP_PAG_POS_Y,
+    PROP_PAG_SCALE,
 };
+
+/* type 枚举与字符串互转，与 config.h 的 PagType 不绑定。 */
+static const int PAG_TYPE_STICKER   = 0;
+static const int PAG_TYPE_PAGEFFECT = 1;
+
+static int
+gst_pagfilter_type_from_string(const gchar* s) {
+    if (!s) return PAG_TYPE_STICKER;
+    /* 不区分大小写，以 ASCII 为准。 */
+    if (g_ascii_strcasecmp(s, "pageffect") == 0) return PAG_TYPE_PAGEFFECT;
+    return PAG_TYPE_STICKER;
+}
+
+static const char*
+gst_pagfilter_type_to_string(int t) {
+    return (t == PAG_TYPE_PAGEFFECT) ? "pageffect" : "sticker";
+}
 
 G_DEFINE_TYPE(GstPagFilter, gst_pagfilter, GST_TYPE_BASE_TRANSFORM);
 
@@ -190,7 +212,40 @@ i420_to_rgba_bt601(const GstVideoFrame* vf,
     }
 }
 
-/* ─────────────────────── vmethod 实现 ─────────────────────── */
+/* RGBA8888 最近邻缩放。
+ * src 尺寸 src_w x src_h，row_bytes 为 src_w*4；dst 尺寸 dst_w x dst_h，
+ * dst_row_bytes 为 dst_w*4。dst 必须已预分配。
+ *
+ * 为什么选最近邻：
+ *   - PAG 内部已按 surface_w x surface_h（= 画面尺寸）渲染，外层
+ *     scale 造成的“贴纸再缩放”在边缘差一两个像素，召双线性会多
+ *     ~3x 计算量但边缘还是不理想（alpha 预乘）。
+ *   - 未来需双线性 / SIMD 加速再升级，本函数本身是独立热点。 */
+static void
+rgba_nearest_resize(const uint8_t* src, int src_w, int src_h, size_t src_row_bytes,
+                    uint8_t*       dst, int dst_w, int dst_h, size_t dst_row_bytes) {
+    if (src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0) return;
+    /* fixed-point 16.16 映射，避免逐像素浮点。 */
+    const uint32_t fx_step = static_cast<uint32_t>((static_cast<uint64_t>(src_w) << 16) / static_cast<uint32_t>(dst_w));
+    const uint32_t fy_step = static_cast<uint32_t>((static_cast<uint64_t>(src_h) << 16) / static_cast<uint32_t>(dst_h));
+    uint32_t fy = fy_step / 2;  /* +0.5 起点偏移，避免总采 src 左上角 */
+    for (int dy = 0; dy < dst_h; ++dy) {
+        const int sy = std::min(static_cast<int>(fy >> 16), src_h - 1);
+        const uint8_t* srow = src + static_cast<size_t>(sy) * src_row_bytes;
+        uint8_t*       drow = dst + static_cast<size_t>(dy) * dst_row_bytes;
+        uint32_t fx = fx_step / 2;
+        for (int dx = 0; dx < dst_w; ++dx) {
+            const int sx = std::min(static_cast<int>(fx >> 16), src_w - 1);
+            const uint8_t* sp = srow + static_cast<size_t>(sx) * 4u;
+            uint8_t*       dp = drow + static_cast<size_t>(dx) * 4u;
+            dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2]; dp[3] = sp[3];
+            fx += fx_step;
+        }
+        fy += fy_step;
+    }
+}
+
+/* ───────────────────── vmethod 实现 ───────────────────── */
 
 /* set_caps：基类已校验 incaps/outcaps 通过模板。
  * 缓存 GstVideoInfo + 按 pag-file 创建 Engine + 切 passthrough，
@@ -346,6 +401,21 @@ gst_pagfilter_transform_ip(GstBaseTransform* trans,
     /* 1) 先消费 pending：可能在此分支换文件 / 改文本，进而改变 engine。 */
     gst_pagfilter_consume_pending_locked(self);
 
+    /* 1.5) 业务分路：PagEffect 占坑模式直接 passthrough（一次性 WARN）。
+     *      锁内读快照即可——type 是 MUTABLE_READY，运行期不会变。 */
+    if (self->type == PAG_TYPE_PAGEFFECT) {
+        const gboolean already_warned = self->pageffect_warned;
+        self->pageffect_warned = TRUE;
+        g_mutex_unlock(lk);
+        if (!already_warned) {
+            GST_WARNING_OBJECT(self,
+                "pagfilter: type=pageffect not implemented yet, "
+                "passthrough (pos/scale ignored)");
+        }
+        /* I420 in/out 不变。 */
+        return GST_FLOW_OK;
+    }
+
     if (self->engine == nullptr || self->in_info == nullptr) {
         /* 双保险：理论上不可达（passthrough 模式不会进这里）。 */
         g_mutex_unlock(lk);
@@ -358,7 +428,7 @@ gst_pagfilter_transform_ip(GstBaseTransform* trans,
     const int sh  = eng->surface_height();
     const size_t row_bytes = static_cast<size_t>(sw) * 4u;
 
-    /* 2) 计算 progress + 准备 image replacement 节流计数。
+    /* 2) 计算 progress + 准备 image replacement 节流计数 + 取 pos/scale 快照。
      * 拿出本帧需要的所有标量后即可放锁——剩下的渲染/blend 完全访问
      * 局部缓冲与 eng（仅 streaming 线程）。 */
     const double prog        = gst_pagfilter_pts_to_progress(self, buf);
@@ -367,6 +437,9 @@ gst_pagfilter_transform_ip(GstBaseTransform* trans,
     const bool   should_replace_img =
         (img_idx >= 0) &&
         ((self->replace_image_counter++ % static_cast<guint64>(img_every)) == 0);
+    const float  pos_x       = self->pos_x;
+    const float  pos_y       = self->pos_y;
+    const float  pag_scale   = self->pag_scale;
 
     g_mutex_unlock(lk);
 
@@ -409,7 +482,15 @@ gst_pagfilter_transform_ip(GstBaseTransform* trans,
         return GST_FLOW_OK;
     }
 
-    /* 6) 把 RGBA premul 帧 blend 到 I420 buffer。 */
+    /* 6) 把 RGBA premul 帧 blend 到 I420 buffer。
+     *    sticker 模式按 (pos_x, pos_y, pag_scale) 几何对齐：
+     *      - 先按 pag_scale 把 sw×sh 的 RGBA 缩放到 dst_w×dst_h（最近邻）；
+     *      - 再让 PAG 画布中心对齐到 (pos_x*frame_w, pos_y*frame_h)；
+     *      - dst_x / dst_y 必须偶数（pag_blend 要求），向最近偶数对齐；
+     *      - 完全在画外则跳过 blend。
+     *
+     *    pag_scale ≈ 1.0 时跳过缩放步骤，省去整张拷贝 + 采样开销
+     *    （现网最常见路径）。 */
     pag_blend::I420Frame dst;
     dst.y        = static_cast<uint8_t*>(GST_VIDEO_FRAME_PLANE_DATA(&vframe, 0));
     dst.u        = static_cast<uint8_t*>(GST_VIDEO_FRAME_PLANE_DATA(&vframe, 1));
@@ -420,17 +501,57 @@ gst_pagfilter_transform_ip(GstBaseTransform* trans,
     dst.u_stride = GST_VIDEO_FRAME_PLANE_STRIDE(&vframe, 1);
     dst.v_stride = GST_VIDEO_FRAME_PLANE_STRIDE(&vframe, 2);
 
-    pag_blend::RgbaPremulFrame src;
-    src.data      = rgba_v->data();
-    src.width     = sw;
-    src.height    = sh;
-    src.row_bytes = static_cast<int>(row_bytes);
+    const float scale_safe = (pag_scale > 0.0f) ? pag_scale : 1.0f;
+    /* 缩放后 RGBA 的目标尺寸；向 2 对齐避免 blend 边界问题。 */
+    int dst_w = static_cast<int>(static_cast<float>(sw) * scale_safe + 0.5f) & ~1;
+    int dst_h = static_cast<int>(static_cast<float>(sh) * scale_safe + 0.5f) & ~1;
+    if (dst_w < 2) dst_w = 2;
+    if (dst_h < 2) dst_h = 2;
 
-    /* 当前贴到左上角 (0,0)。锥点/缩放后置。 */
-    if (!pag_blend::blend_rgba_premul_over_i420(src, dst, 0, 0)) {
+    /* PAG 画布中心 → 画面归一化坐标。dst_x/dst_y = 中心对齐结果，再向偶数对齐
+     * （pag_blend 要求偶数，否则返回 false）。 */
+    const float cx = pos_x * static_cast<float>(dst.width);
+    const float cy = pos_y * static_cast<float>(dst.height);
+    int dst_x = static_cast<int>(cx - static_cast<float>(dst_w) * 0.5f + 0.5f);
+    int dst_y = static_cast<int>(cy - static_cast<float>(dst_h) * 0.5f + 0.5f);
+    /* 偶数对齐：向 0 取整到偶数。负数一并处理（-1 → -2，-3 → -4）。 */
+    if (dst_x & 1) dst_x = (dst_x >= 0) ? (dst_x - 1) : (dst_x - 1);
+    if (dst_y & 1) dst_y = (dst_y >= 0) ? (dst_y - 1) : (dst_y - 1);
+
+    /* 早退：完全在画外，跳过 blend（也跳过缩放工作）。 */
+    if (dst_x + dst_w <= 0 || dst_y + dst_h <= 0 ||
+        dst_x >= dst.width || dst_y >= dst.height) {
+        gst_video_frame_unmap(&vframe);
+        return GST_FLOW_OK;
+    }
+
+    /* 准备最终 src（要么直接 sw×sh，要么缩放到 dst_w×dst_h）。
+     * scale ≈ 1 且 dst_w==sw && dst_h==sh 时直接复用 rgba_buf。 */
+    pag_blend::RgbaPremulFrame src;
+    std::vector<uint8_t> scaled_buf;
+    if (dst_w == sw && dst_h == sh) {
+        src.data      = rgba_v->data();
+        src.width     = sw;
+        src.height    = sh;
+        src.row_bytes = static_cast<int>(row_bytes);
+    } else {
+        scaled_buf.resize(static_cast<size_t>(dst_w) * static_cast<size_t>(dst_h) * 4u);
+        rgba_nearest_resize(rgba_v->data(), sw, sh, row_bytes,
+                            scaled_buf.data(), dst_w, dst_h,
+                            static_cast<size_t>(dst_w) * 4u);
+        src.data      = scaled_buf.data();
+        src.width     = dst_w;
+        src.height    = dst_h;
+        src.row_bytes = dst_w * 4;
+    }
+
+    if (!pag_blend::blend_rgba_premul_over_i420(src, dst, dst_x, dst_y)) {
         GST_WARNING_OBJECT(self,
                            "pagfilter: blend_rgba_premul_over_i420 rejected "
-                           "params; passing buffer through this frame");
+                           "params (dst=%dx%d at (%d,%d), src=%dx%d); "
+                           "passing buffer through this frame",
+                           dst.width, dst.height, dst_x, dst_y,
+                           src.width, src.height);
     }
 
     gst_video_frame_unmap(&vframe);
@@ -544,6 +665,37 @@ gst_pagfilter_set_property(GObject*      object,
         g_mutex_unlock(lk);
         break;
     }
+    case PROP_PAG_TYPE: {
+        const gchar* s = g_value_get_string(value);
+        const int t = gst_pagfilter_type_from_string(s);
+        g_mutex_lock(lk);
+        if (self->type != t) {
+            self->type = t;
+            self->pageffect_warned = FALSE;  /* 重新允许打一次 WARN */
+        }
+        g_mutex_unlock(lk);
+        break;
+    }
+    case PROP_PAG_POS_X: {
+        g_mutex_lock(lk);
+        self->pos_x = g_value_get_float(value);
+        g_mutex_unlock(lk);
+        break;
+    }
+    case PROP_PAG_POS_Y: {
+        g_mutex_lock(lk);
+        self->pos_y = g_value_get_float(value);
+        g_mutex_unlock(lk);
+        break;
+    }
+    case PROP_PAG_SCALE: {
+        gfloat v = g_value_get_float(value);
+        if (v <= 0.0f) v = 1.0f;  /* 防御：上层已 clamp，这里双保险。 */
+        g_mutex_lock(lk);
+        self->pag_scale = v;
+        g_mutex_unlock(lk);
+        break;
+    }
     default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
         break;
@@ -590,6 +742,26 @@ gst_pagfilter_get_property(GObject*    object,
     case PROP_REPLACE_IMAGE_EVERY:
         g_mutex_lock(lk);
         g_value_set_int(value, self->replace_image_every);
+        g_mutex_unlock(lk);
+        break;
+    case PROP_PAG_TYPE:
+        g_mutex_lock(lk);
+        g_value_set_string(value, gst_pagfilter_type_to_string(self->type));
+        g_mutex_unlock(lk);
+        break;
+    case PROP_PAG_POS_X:
+        g_mutex_lock(lk);
+        g_value_set_float(value, self->pos_x);
+        g_mutex_unlock(lk);
+        break;
+    case PROP_PAG_POS_Y:
+        g_mutex_lock(lk);
+        g_value_set_float(value, self->pos_y);
+        g_mutex_unlock(lk);
+        break;
+    case PROP_PAG_SCALE:
+        g_mutex_lock(lk);
+        g_value_set_float(value, self->pag_scale);
         g_mutex_unlock(lk);
         break;
     default:
@@ -692,6 +864,64 @@ gst_pagfilter_class_init(GstPagFilterClass* klass) {
                 G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
                 GST_PARAM_MUTABLE_PLAYING)));
 
+    /* 业务分路：sticker | pageffect。MUTABLE_READY —— 不允许 PLAYING 切，
+     * 避免渲染拓扑运行期重组。 */
+    g_object_class_install_property(
+        gobject_class,
+        PROP_PAG_TYPE,
+        g_param_spec_string(
+            "pag-type",
+            "PAG usage type",
+            "PAG asset usage mode: 'sticker' (default, render+blend over video) "
+            "or 'pageffect' (video replacement track; not implemented yet, "
+            "falls through to passthrough at runtime). Mutable in NULL/READY only.",
+            "sticker",
+            static_cast<GParamFlags>(
+                G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+                GST_PARAM_MUTABLE_READY)));
+
+    /* 几何：sticker 模式下生效，PAG 画布中心对齐到画面归一化坐标。
+     * 允许 (-2,3) 超出画布（飞入飞出动画）。
+     * MUTABLE_PLAYING：运行期可调。 */
+    g_object_class_install_property(
+        gobject_class,
+        PROP_PAG_POS_X,
+        g_param_spec_float(
+            "pag-pos-x",
+            "PAG canvas center X (sticker only)",
+            "Normalized X coordinate where the PAG canvas center is placed "
+            "on the video frame. 0=left, 1=right. Sticker mode only.",
+            -2.0f, 3.0f, 0.5f,
+            static_cast<GParamFlags>(
+                G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+                GST_PARAM_MUTABLE_PLAYING)));
+
+    g_object_class_install_property(
+        gobject_class,
+        PROP_PAG_POS_Y,
+        g_param_spec_float(
+            "pag-pos-y",
+            "PAG canvas center Y (sticker only)",
+            "Normalized Y coordinate where the PAG canvas center is placed "
+            "on the video frame. 0=top, 1=bottom. Sticker mode only.",
+            -2.0f, 3.0f, 0.5f,
+            static_cast<GParamFlags>(
+                G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+                GST_PARAM_MUTABLE_PLAYING)));
+
+    g_object_class_install_property(
+        gobject_class,
+        PROP_PAG_SCALE,
+        g_param_spec_float(
+            "pag-scale",
+            "PAG canvas uniform scale (sticker only)",
+            "Uniform scale applied to the PAG canvas before alpha-blend onto "
+            "the video frame. 1.0=same size as video frame. Sticker mode only.",
+            0.01f, 8.0f, 1.0f,
+            static_cast<GParamFlags>(
+                G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+                GST_PARAM_MUTABLE_PLAYING)));
+
     gst_element_class_set_static_metadata(
         element_class,
         "PAG Filter",
@@ -729,6 +959,13 @@ gst_pagfilter_init(GstPagFilter* self) {
     self->replace_image_idx  = -1;
     self->replace_image_every = 2;
     self->replace_image_counter = 0;
+
+    /* 业务分路与几何默认值。type 默认 sticker，pos 居中，scale=1。 */
+    self->type             = PAG_TYPE_STICKER;
+    self->pos_x            = 0.5f;
+    self->pos_y            = 0.5f;
+    self->pag_scale        = 1.0f;
+    self->pageffect_warned = FALSE;
 
     /* 默认 passthrough；set_caps 命中渲染时再切到非 passthrough。 */
     GstBaseTransform* trans = GST_BASE_TRANSFORM(self);

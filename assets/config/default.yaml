@@ -34,7 +34,21 @@ filter:
   pag:
     enabled: true                     # 总开关；主分支随时可发布建议设为 false
     selftest: false                    # true 时启动期 libpag 自检（仅在编译开 -DVM_IOT_ENABLE_LIBPAG=ON 时真正调 libpag）
-    file: "pag/PAG_LOGO.pag"             # .pag 素材路径；Stage 5 默认用 Video.pag 演示文本/视频图层替换
+    # type 决定 .pag 资源的使用方式：
+    #   sticker  ：常规贴纸，PAG 整张画布按 position+scale 叠加到画面（默认）
+    #   pageffect：视频替换轨道（把当前视频帧塞进 PAG 视频图层），未实现，
+    #              运行期 pagfilter 一次性 WARN 后 passthrough；
+    #              此模式下 position / scale 字段会被忽略。
+    type: sticker
+    file: "pag/PAG_LOGO.pag"             # .pag 素材路径；启动期由 PagBranch 注入到 pagfilter
+    # 仅 sticker 生效；坐标系：画面左上=(0,0)，右下=(1,1)。
+    # position 表示 "PAG 画布中心" 对齐到画面上的归一化点；
+    # 例：(0.5,0.5) 居中；(1,1) PAG 中心贴在画面右下角；
+    position:
+      x: 0.85
+      y: 0.75
+    # 仅 sticker 生效；PAG 画布整体等比缩放系数，1.0=与画面同尺寸；
+    scale: 0.5
 
 control:
   request_fifo: /tmp/vm_iot.ctl       # 命令请求 FIFO；空串=不开启控制通道

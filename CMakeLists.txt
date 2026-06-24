@@ -40,7 +40,7 @@ target_include_directories(vm_iot
         src/filter
         src/branches
         src/branches/snapshot
-        src/branches/pag_overlay
+        src/branches/pag
         src/control
         src/rtsp
         src/util
@@ -54,12 +54,21 @@ target_link_libraries(vm_iot PUBLIC
 # ---- libpag ----
 # 目标平台只考虑树莓派 aarch64 Debian/Raspbian。其他平台请自行扩展。
 # 运行依赖：sudo apt install libegl-dev libgles2-mesa-dev
-set(VM_IOT_ENABLE_LIBPAG OFF)
+set(VM_IOT_ENABLE_LIBPAG ON)
 message(STATUS "VM_IOT_ENABLE_LIBPAG=${VM_IOT_ENABLE_LIBPAG}")
 
+# libpag 预编译产物按 "<arch>-<libc>-<distro><ver>" 分目录存放在 third_party/libpag/ 下。
+# 当前可用子目录：
+#   - aarch64-linux-gnu-ubuntu22  ← UTM 上的 ARM Ubuntu 22.04（当前默认）
+#   - aarch64-linux-gnu-ubuntu24  ← ARM Ubuntu 24.04
+# 切换环境时改这一行即可（或在 cmake 命令行用 -DVM_IOT_LIBPAG_TRIPLET=... 覆盖）。
+set(VM_IOT_LIBPAG_TRIPLET "aarch64-linux-gnu-ubuntu22"
+        CACHE STRING "libpag prebuilt subdir under third_party/libpag/")
+message(STATUS "VM_IOT_LIBPAG_TRIPLET=${VM_IOT_LIBPAG_TRIPLET}")
+
+
 if (VM_IOT_ENABLE_LIBPAG)
-    # 预编译产物的固定路径——构建步骤见 docs/task/libpag.md。
-    set(_libpag_lib     "${CMAKE_SOURCE_DIR}/third_party/libpag/aarch64-linux-gnu/lib/libpag.a")
+    set(_libpag_lib     "${CMAKE_SOURCE_DIR}/third_party/libpag/${VM_IOT_LIBPAG_TRIPLET}/lib/libpag.a")
     set(_libpag_include "${CMAKE_SOURCE_DIR}/third_party/libpag/include")
 
     if (NOT EXISTS "${_libpag_lib}" OR NOT EXISTS "${_libpag_include}/pag/pag.h")
@@ -67,7 +76,8 @@ if (VM_IOT_ENABLE_LIBPAG)
                 "libpag artifacts missing. Expected:\n"
                 "  ${_libpag_lib}\n"
                 "  ${_libpag_include}/pag/pag.h\n"
-                "See docs/task/libpag.md for how to build them on the Pi.")
+                "Check VM_IOT_LIBPAG_TRIPLET (currently '${VM_IOT_LIBPAG_TRIPLET}') "
+                "or see docs/task/libpag.md for how to build them.")
     endif ()
 
     # 系统 Mesa 提供 EGL / GLESv2；libpag.a 不包含这两类符号。
