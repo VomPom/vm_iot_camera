@@ -43,7 +43,8 @@
 ## 分类目录
 
 ### 1. Source（视频源）
-- [v4l2src](./v4l2src.md) —— Linux V4L2 摄像头采集源
+- [v4l2src](./v4l2src.md) —— Linux V4L2 摄像头采集源（USB UVC / 通用 V4L2 节点）
+- [libcamerasrc](./libcamerasrc.md) —— libcamera 视频源（树莓派 CSI 摄像头唯一可用路径，与 v4l2src 互斥）
 
 ### 2. Parser / Decoder（解析与解码）
 - [jpegparse](./jpegparse.md) —— MJPEG 流帧边界对齐与容错

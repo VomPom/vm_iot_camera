@@ -14,6 +14,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <gst/gst.h>
 
 std::string PipelineBuilder::encoder_str(const EncoderConfig& e, std::string& src_fmt) {
     std::ostringstream os;
@@ -254,13 +255,14 @@ ChosenInput choose_input(const Config& c) {
 
 /**
  * 上游 source 段拼装：v4l2src + caps + 可选 jpeg 解码。
- * 返回的串以"... ! "结尾，外层继续拼下游 videoconvert/scale/rate。
+ * 返回的串以“... ! ”结尾，外层继续拼下游 videoconvert/scale/rate。
  */
-std::string build_source_segment(const Config& c) {
+std::string build_source_segment_v4l2(const Config& c, bool& probe_ok) {
     std::ostringstream os;
     os << "v4l2src device=" << c.capture.device << " do-timestamp=true ! ";
 
     auto chosen = choose_input(c);
+    probe_ok = chosen.ok;
     if (chosen.ok) {
         os << PipelineBuilder::make_input_caps(chosen.cap, chosen.fps) << " ! ";
         if (chosen.cap.media_type == "image/jpeg") {
@@ -268,7 +270,7 @@ std::string build_source_segment(const Config& c) {
             os << "jpegparse ! jpegdec ! ";
         }
     } else {
-        // 兜底：完全按用户配置硬拼，与改造前一致；启动失败时 GStreamer 会自己报错
+        // 兑底：完全按用户配置硬拼，与改造前一致；启动失败时 GStreamer 会自己报错
         LOGW("falling back to hard-coded caps (legacy behavior): "
              "format={} {}x{}@{}",
              c.capture.pixfmt, c.capture.width, c.capture.height, c.capture.framerate);
@@ -278,6 +280,57 @@ std::string build_source_segment(const Config& c) {
            << ",framerate=" << c.capture.framerate << "/1 ! ";
     }
     return os.str();
+}
+
+/**
+ * 上游 source 段：libcamerasrc + 固定 NV12 caps。
+ *
+ * 为什么写死 NV12：
+ *   - Pi5 PiSP / Pi4 unicam 经 libcamera 出口几乎一定支持 NV12，可预测、好排查；
+ *   - 下游已有 videoconvert ! videoscale ! videorate 收敛到 cfg.capture.pixfmt（默认 I420），
+ *     多一次 NV12→I420 转换在 Pi 上成本可忽。
+ *
+ * 刷上不带 do-timestamp：libcamerasrc 默认就会打硬件时间戳，加该属性反而会 warn。
+ * 不带 camera-name：单 sensor 场景 libcamera 默认选 0 号，行为确定。
+ */
+std::string build_source_segment_libcamera(const Config& c) {
+    std::ostringstream os;
+    os << "libcamerasrc ! "
+       << "video/x-raw,format=NV12"
+       << ",width="     << c.capture.width
+       << ",height="    << c.capture.height
+       << ",framerate=" << c.capture.framerate << "/1 ! ";
+    return os.str();
+}
+
+/**
+ * 上游 source 段拼装：根据 c.capture.source 分路。
+ *   - v4l2      → 原有逻辑（探测 + caps + 可选 jpeg 解码）；探测空走 hard-coded 兑底。
+ *   - libcamera → 直接上 libcamerasrc + NV12 caps。
+ *   - auto      → 先试 v4l2_prober，empty 自动降级到 libcamerasrc，
+ *                 避免“探测空 → 硬拼 I420 caps →一定协商失败”这条死路。
+ *
+ * 返回的串以“... ! ”结尾。
+ */
+std::string build_source_segment(const Config& c) {
+    if (c.capture.source == "libcamera") {
+        LOGI("source backend: libcamera (forced by capture.source)");
+        return build_source_segment_libcamera(c);
+    }
+    if (c.capture.source == "v4l2") {
+        LOGI("source backend: v4l2 (forced by capture.source)");
+        bool ok = false;
+        return build_source_segment_v4l2(c, ok);
+    }
+    // auto：先试 v4l2，探测空 → libcamera。
+    bool probe_ok = false;
+    std::string seg = build_source_segment_v4l2(c, probe_ok);
+    if (probe_ok) {
+        LOGI("source backend: v4l2 (auto: v4l2_prober succeeded)");
+        return seg;
+    }
+    LOGW("source backend: v4l2_prober empty, auto-fallback to libcamerasrc");
+    return build_source_segment_libcamera(c);
 }
 
 } // namespace
@@ -291,9 +344,25 @@ std::string PipelineBuilder::build(const Config& c) {
     std::string enc       = encoder_str(c.encoder, src_fmt);
     const bool  is_h265   = (c.encoder.backend == "x265");
 
+    /* 如果走到 libcamerasrc（显式指定或 auto 降级），启动期先检查插件是否装了，
+     * 避免后面 launch 报个 no such element 让用户费劲猜。
+     * - source=v4l2 时不检查，跳过。
+     * - source=auto 时会在 build_source_segment() 里先跑 v4l2_prober，
+     *   探测成功也不会到 libcamerasrc；为简化检查，这里在 source!=v4l2 时都检查。 */
+    if (c.capture.source != "v4l2") {
+        GstElementFactory* f = gst_element_factory_find("libcamerasrc");
+        if (!f) {
+            LOGW("libcamerasrc factory not found; install gstreamer1.0-libcamera "
+                 "(Pi OS Bookworm: apt install gstreamer1.0-libcamera). "
+                 "In source='auto' mode, this only matters if v4l2_prober is empty.");
+        } else {
+            gst_object_unref(f);
+        }
+    }
+
     std::ostringstream os;
 
-    /* ── 上游：v4l2src + 探测得到的 caps + 解码（如需） ── */
+    /* ── 上游：v4l2src/libcamerasrc + caps + 解码（如需） ── */
     os << "( " << build_source_segment(c);
 
     /* ── 下游统一 caps：把任意上游格式收敛成 cfg.capture.pixfmt + 期望分辨率/帧率 ──

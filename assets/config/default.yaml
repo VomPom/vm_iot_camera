@@ -3,6 +3,16 @@ server:
   mount: /live
 capture:
   device: /dev/video0
+  # 上游视频源后端：
+  #   auto      —— 默认。先跑 V4L2Prober，能力清单为空（典型：Pi CSI 输出
+  #                Bayer/PiSP 自定义 fourcc，prober 全跳过）则自动降级到
+  #                libcamerasrc，避免硬拼 caps 协商失败。
+  #   v4l2      —— 强制 v4l2src + 探测；适合 USB UVC 摄像头与 UTM x86 测试。
+  #   libcamera —— 强制 libcamerasrc；明知是 Pi CSI 时跳过探测，启动更快。
+  # 注意：libcamera 模式下上游 caps 固定为 NV12（Pi 上几乎一定支持），
+  #       prefer_jpeg / 上游 pixfmt 探测均不参与；下游 videoconvert 会
+  #       自动转到本节末尾的 pixfmt。
+  source: auto
   # 以下三项是「期望参数」：启动期 V4L2Prober 探测设备真实能力后，
   # CapsRanker 会选出最接近的 (fmt,w,h,fps) 组合作为上游 caps。
   width: 1280

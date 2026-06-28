@@ -65,6 +65,15 @@ Config Config::from_file(const std::string& path) {
         c.capture.framerate   = cap["framerate"  ].as<int>        (c.capture.framerate);
         c.capture.pixfmt      = cap["pixfmt"     ].as<std::string>(c.capture.pixfmt);
         c.capture.prefer_jpeg = cap["prefer_jpeg"].as<bool>       (c.capture.prefer_jpeg);
+        c.capture.source      = cap["source"     ].as<std::string>(c.capture.source);
+
+        /* source 合法性校验：只允许 auto | v4l2 | libcamera，未知值降级到 auto + warn。 */
+        const std::string& src = c.capture.source;
+        if (src != "auto" && src != "v4l2" && src != "libcamera") {
+            spdlog::warn("capture.source='{}' unknown, fallback to 'auto' "
+                         "(allowed: auto | v4l2 | libcamera)", src);
+            c.capture.source = "auto";
+        }
     }
     if (auto e = n["encoder"]) {
         c.encoder.backend      = e["backend"     ].as<std::string>(c.encoder.backend);
@@ -207,6 +216,12 @@ const std::unordered_map<std::string, Setter>& setters() {
         {"capture.framerate",    [](Config& c, const std::string& v){ c.capture.framerate = parse_int(v, "capture.framerate"); }},
         {"capture.pixfmt",       [](Config& c, const std::string& v){ c.capture.pixfmt    = v; }},
         {"capture.prefer_jpeg",  [](Config& c, const std::string& v){ c.capture.prefer_jpeg = parse_bool(v, "capture.prefer_jpeg"); }},
+        {"capture.source",       [](Config& c, const std::string& v){
+            if (v != "auto" && v != "v4l2" && v != "libcamera")
+                throw std::invalid_argument("invalid capture.source: " + v
+                    + " (allowed: auto | v4l2 | libcamera)");
+            c.capture.source = v;
+        }},
 
         {"encoder.backend",      [](Config& c, const std::string& v){ c.encoder.backend      = v; }},
         {"encoder.bitrate_kbps", [](Config& c, const std::string& v){ c.encoder.bitrate_kbps = parse_int(v, "encoder.bitrate_kbps"); }},

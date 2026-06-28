@@ -29,6 +29,17 @@ struct ServerConfig {
  *     之后必有 jpegdec? + videoconvert + videoscale + videorate 收敛到该 pixfmt。
  *   - prefer_jpeg：true 时 ranker 优先选 MJPG（USB 摄像头常用，码流小）；
  *     false 时优先选 raw（未来 zero-copy GPU 上传场景）。
+ *   - source：上游视频源后端，三选一：
+ *       "auto"     —— 默认。先跑 v4l2_prober，能力清单非空走 v4l2src；
+ *                     探测为空（典型场景：Pi CSI 摄像头，/dev/video0 输出
+ *                     Bayer/PiSP 自定义 fourcc，prober 全部跳过）则降级到
+ *                     libcamerasrc，避免硬拼 caps 协商失败。
+ *       "v4l2"     —— 强制 v4l2src + 探测；适合 USB UVC 摄像头与 UTM x86
+ *                     测试环境；探测失败时仍走 hard-coded caps 兜底（旧行为）。
+ *       "libcamera" —— 强制 libcamerasrc；明知是 Pi CSI 时跳过探测，启动更快。
+ *     仅 "v4l2" / "auto" 模式下 prefer_jpeg / pixfmt 才会经探测/排序参与协商；
+ *     "libcamera" 模式下上游 caps 固定为 NV12（Pi 上几乎一定支持，下游
+ *     videoconvert 自动转换到 cfg.capture.pixfmt）。
  */
 struct CaptureConfig {
     std::string device = "/dev/video0";
@@ -37,6 +48,7 @@ struct CaptureConfig {
     int framerate = 30;
     std::string pixfmt = "I420";
     bool prefer_jpeg = true;
+    std::string source = "auto";   // auto | v4l2 | libcamera
 };
 
 struct EncoderConfig {
