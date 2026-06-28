@@ -20,7 +20,7 @@ set(VM_IOT_TEST_SRCS
 
 # pipeline_builder.cpp 包含 <gst/gst.h>，需要 GStreamer 的 include / link。
 # pagfilter 另外依赖 gstreamer-base（GstBaseTransform）与 gstreamer-video
-# （Stage 4.3 起 transform_ip 用 GstVideoFrame 取 plane 指针/stride）。
+# （transform_ip 用 GstVideoFrame 取 plane 指针/stride）。
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GST_TEST REQUIRED IMPORTED_TARGET
         gstreamer-1.0

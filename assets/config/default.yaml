@@ -1,0 +1,70 @@
+server:
+  port: 8554
+  mount: /live
+capture:
+  device: /dev/video0
+  # 以下三项是「期望参数」：启动期 V4L2Prober 探测设备真实能力后，
+  # CapsRanker 会选出最接近的 (fmt,w,h,fps) 组合作为上游 caps。
+  width: 1280
+  height: 720
+  framerate: 30
+  # 下游统一格式：编码器输入的像素格式，pipeline 强制收敛到此格式。
+  # 与上游解耦——无论摄像头给的是 MJPG 还是 YUY2，下游都拿到同一份。
+  pixfmt: I420                         # I420 | YUY2 | NV12 ...
+  prefer_jpeg: true                    # true=优先选 MJPG（USB 摄像头主流），false=优先选 raw
+
+encoder:
+  backend: x264          # x264 | openh264 | x265   （仅支持纯软编后端）
+  bitrate_kbps: 4000
+  gop: 30
+  bframes: 0             # 仅 x264 生效；openh264 / x265 忽略此项
+
+filter:
+  enabled: true                       # 总开关：false 时 pipeline 不插入 GL 滤镜段
+  shader: effects.frag                # 单一着色器文件；相对路径以 assets/shaders 为基目录
+  filter_type: 0                      # 启动默认特效：0=passthrough 1=mosaic 2=invert
+  max_type: 2                         # filter next 循环上限（含），与 shader 内 if 分支保持一致
+  # PAG 自研滤镜段（自定义 GstElement: pagfilter）
+  # enabled=true 时在 pipeline 插入一个 pagfilter 元素，按 file 加载 .pag 并
+  # 把渲染结果 alpha-blend 到主线 I420 上。
+  # pagfilter 支持 PLAYING 状态热切：可通过 iotcamctl 在线改
+  # pag-file / 文本图层 / 视频图层占位（详见 docs/task/libpag.md）。
+  # selftest=true 时启动期一次性调用 libpag 加载 file 并打印元信息，
+  # 用于验证 SDK 编译/链接通；独立于 enabled，不影响 pipeline。
+  pag:
+    enabled: true                     # 总开关；主分支随时可发布建议设为 false
+    selftest: false                    # true 时启动期 libpag 自检（仅在编译开 -DVM_IOT_ENABLE_LIBPAG=ON 时真正调 libpag）
+    # type 决定 .pag 资源的使用方式：
+    #   sticker  ：常规贴纸，PAG 整张画布按 position+scale 叠加到画面（默认）
+    #   pageffect：视频替换轨道（把当前视频帧塞进 PAG 视频图层），未实现，
+    #              运行期 pagfilter 一次性 WARN 后 passthrough；
+    #              此模式下 position / scale 字段会被忽略。
+    type: sticker
+    file: "pag/PAG_LOGO.pag"             # .pag 素材路径；启动期由 PagBranch 注入到 pagfilter
+    # 仅 sticker 生效；坐标系：画面左上=(0,0)，右下=(1,1)。
+    # position 表示 "PAG 画布中心" 对齐到画面上的归一化点；
+    # 例：(0.5,0.5) 居中；(1,1) PAG 中心贴在画面右下角；
+    position:
+      x: 0.85
+      y: 0.75
+    # 仅 sticker 生效；PAG 画布整体等比缩放系数，1.0=与画面同尺寸；
+    scale: 0.5
+
+control:
+  request_fifo: /tmp/vm_iot.ctl       # 命令请求 FIFO；空串=不开启控制通道
+  reply_fifo:   /tmp/vm_iot.reply     # 命令应答 FIFO；空串=不写回执
+
+snapshot:
+  dir: /tmp/vm_iot/snapshots          # 默认输出目录；snapshot 命令未带 path 时使用
+  quality: 90                         # JPEG 质量（预留，当前 jpegenc 未启用）
+  timeout_ms: 1500                    # 单次截图等待 buffer 落盘超时
+# 规划中（暂未实现）：低分辨率检测副线，从 raw tee=t 拉，独立分辨率/帧率
+# detect:
+#   enabled: false
+#   width: 320
+#   height: 240
+#   framerate: 5
+#   appsink_max_buffers: 2
+
+log:
+  level: info             # trace|debug|info|warn|err

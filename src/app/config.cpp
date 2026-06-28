@@ -17,7 +17,31 @@
 #include <stdexcept>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
+#include <cmath>
 #include <spdlog/spdlog.h>
+
+/* ─────────── PagType ↔ string ───────────
+ * 与 yaml "filter.pag.type" / pagfilter GObject "pag-type" 属性
+ * 共用同一份字符串字面量，避免两边各写一份散开。 */
+const char* to_string(PagType t) {
+    switch (t) {
+        case PagType::Sticker:   return "sticker";
+        case PagType::PagEffect: return "pageffect";
+    }
+    return "sticker";
+}
+
+PagType pag_type_from_str(const std::string& s, PagType fallback) {
+    /* 容忍大小写：yaml 写 "Sticker" / "STICKER" 都接受。 */
+    std::string low; low.reserve(s.size());
+    for (char c : s) low.push_back(static_cast<char>(::tolower(c)));
+    if (low == "sticker")   return PagType::Sticker;
+    if (low == "pageffect") return PagType::PagEffect;
+    spdlog::warn("filter.pag.type='{}' unknown, fallback to '{}'",
+                 s, to_string(fallback));
+    return fallback;
+}
 
 Config Config::from_file(const std::string& path) {
     Config c;
@@ -69,16 +93,45 @@ Config Config::from_file(const std::string& path) {
             c.filter.filter_type = 0;
         }
 
-    /* filter.pag.*：读 enabled / selftest / file。
-         * file 为空且 enabled=true 允许（Stage 1/2 不读文件）。
-         * invert 与 enabled 独立生效：enabled=true && invert=false
-         * 时 pagfilter 仍为默认 passthrough，行为等同 Stage 1。
-         * selftest 与 enabled 也独立：用来在不修改 pipeline 的前提下
-         * 单独验证 libpag 链接是否通。 */
+    /* filter.pag.*：读 enabled / selftest / type / file / position / scale。
+         * file 为空且 enabled=true 允许：此时 pagfilter 仍在管线中，但会退化
+         * 为 passthrough，行为等价于完全没有该元素。
+         * selftest 与 enabled 独立：用来在不修改 pipeline 的前提下
+         * 单独验证 libpag 链接是否通。
+         * type 缺省 sticker；非法值 → fallback=Sticker + warn（在
+         * pag_type_from_str 内部打印）。
+         * position / scale 仅 type=Sticker 生效；越界值 clamp 后 warn。 */
     if (auto p = f["pag"]) {
         c.filter.pag.enabled  = p["enabled" ].as<bool>(c.filter.pag.enabled);
         c.filter.pag.selftest = p["selftest"].as<bool>(c.filter.pag.selftest);
         c.filter.pag.file     = p["file"    ].as<std::string>(c.filter.pag.file);
+        if (p["type"]) {
+            const std::string t = p["type"].as<std::string>("");
+            c.filter.pag.type = pag_type_from_str(t, c.filter.pag.type);
+        }
+        if (auto pos = p["position"]) {
+            c.filter.pag.pos_x = pos["x"].as<float>(c.filter.pag.pos_x);
+            c.filter.pag.pos_y = pos["y"].as<float>(c.filter.pag.pos_y);
+        }
+        c.filter.pag.scale = p["scale"].as<float>(c.filter.pag.scale);
+
+        /* clamp + warn：超出范围按上下限收敛，避免后续 blend / 渲染出现
+         * 极端尺寸或 NaN。 */
+        auto clamp_warn = [](float& v, float lo, float hi, const char* key) {
+            if (!(v >= lo && v <= hi)) {                 // 同时拦 NaN（NaN 比较恒 false）
+                spdlog::warn("filter.pag.{}={} out of [{}, {}], clamped",
+                             key, v, lo, hi);
+                v = std::max(lo, std::min(hi, std::isnan(v) ? lo : v));
+            }
+        };
+        clamp_warn(c.filter.pag.pos_x, -2.0f, 3.0f,  "position.x");
+        clamp_warn(c.filter.pag.pos_y, -2.0f, 3.0f,  "position.y");
+        clamp_warn(c.filter.pag.scale,  0.01f, 8.0f, "scale");
+
+        if (c.filter.pag.type == PagType::PagEffect) {
+            spdlog::info("filter.pag.type=pageffect: position/scale ignored "
+                         "in this mode (TODO: not implemented yet)");
+        }
         }
     }
 
@@ -123,6 +176,10 @@ int parse_int(const std::string& v, const std::string& key) {
     try { return std::stoi(v); }
     catch (...) { throw std::invalid_argument("invalid int for '" + key + "': " + v); }
 }
+float parse_float(const std::string& v, const std::string& key) {
+    try { return std::stof(v); }
+    catch (...) { throw std::invalid_argument("invalid float for '" + key + "': " + v); }
+}
 uint16_t parse_u16(const std::string& v, const std::string& key) {
     int x = parse_int(v, key);
     if (x < 0 || x > 65535) throw std::invalid_argument("port out of range for '" + key + "': " + v);
@@ -163,9 +220,13 @@ const std::unordered_map<std::string, Setter>& setters() {
         {"filter.filter_type",   [](Config& c, const std::string& v){ c.filter.filter_type   = parse_int(v, "filter.filter_type"); }},
         {"filter.max_type",      [](Config& c, const std::string& v){ c.filter.max_type      = parse_int(v, "filter.max_type"); }},
 
-        {"filter.pag.enabled",   [](Config& c, const std::string& v){ c.filter.pag.enabled   = parse_bool(v, "filter.pag.enabled"); }},
-        {"filter.pag.selftest",  [](Config& c, const std::string& v){ c.filter.pag.selftest  = parse_bool(v, "filter.pag.selftest"); }},
-        {"filter.pag.file",      [](Config& c, const std::string& v){ c.filter.pag.file      = v; }},
+        {"filter.pag.enabled",     [](Config& c, const std::string& v){ c.filter.pag.enabled   = parse_bool(v, "filter.pag.enabled"); }},
+        {"filter.pag.selftest",    [](Config& c, const std::string& v){ c.filter.pag.selftest  = parse_bool(v, "filter.pag.selftest"); }},
+        {"filter.pag.type",        [](Config& c, const std::string& v){ c.filter.pag.type      = pag_type_from_str(v, c.filter.pag.type); }},
+        {"filter.pag.file",        [](Config& c, const std::string& v){ c.filter.pag.file      = v; }},
+        {"filter.pag.position.x",  [](Config& c, const std::string& v){ c.filter.pag.pos_x     = parse_float(v, "filter.pag.position.x"); }},
+        {"filter.pag.position.y",  [](Config& c, const std::string& v){ c.filter.pag.pos_y     = parse_float(v, "filter.pag.position.y"); }},
+        {"filter.pag.scale",       [](Config& c, const std::string& v){ c.filter.pag.scale     = parse_float(v, "filter.pag.scale"); }},
 
         {"control.request_fifo", [](Config& c, const std::string& v){ c.control.request_fifo = v; }},
         {"control.reply_fifo",   [](Config& c, const std::string& v){ c.control.reply_fifo   = v; }},
@@ -200,7 +261,7 @@ void apply_kv(Config& cfg, const std::string& key, const std::string& value) {
 void print_help() {
     std::printf(
         "Usage: iotcam [OPTIONS]\n"
-        "  -c, --config FILE         load YAML config (default: config/default.yaml)\n"
+"  -c, --config FILE         load YAML config (default: assets/config/default.yaml)\n"
         "  -d, --device PATH         alias of --set capture.device=PATH\n"
         "  -p, --port N              alias of --set server.port=N\n"
         "  -b, --bitrate KBPS        alias of --set encoder.bitrate_kbps=KBPS\n"

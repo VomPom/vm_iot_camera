@@ -8,8 +8,11 @@
 #include "shader_filter.h"
 #include "rtsp_server.h"
 #include "snapshot.h"
+#include "pag_branch.h"
+#include "pag_effect.h"
 #include "config.h"
 #include "log.h"
+#include <filesystem>
 
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -46,12 +49,14 @@ bool ControlChannel::start(const std::string& req_path,
                            const Config* cfg,
                            const RtspServer* server,
                            Snapshot* snapshot,
+                           PagBranch* pag_branch,
                            std::chrono::steady_clock::time_point start_time)
 {
     filter_ = filter;
     cfg_ = cfg;
     server_ = server;
     snapshot_ = snapshot;
+    pag_branch_ = pag_branch;
     start_time_ = start_time;
 
     /* 1) 请求 FIFO（必须有 filter，否则 ShaderFilter 命令无意义；但不强求 server/cfg）。 */
@@ -195,6 +200,7 @@ void ControlChannel::stop()
     cfg_ = nullptr;
     server_ = nullptr;
     snapshot_ = nullptr;
+    pag_branch_ = nullptr;
 }
 
 gboolean ControlChannel::on_readable(GIOChannel* src, GIOCondition cond, gpointer user)
@@ -298,6 +304,10 @@ void ControlChannel::handle_line(const std::string& line)
         // TODO: 未来命令族扩展到1位数 (detect/motion 加入后)，
         //       考虑用 map<string, handler> 替换这里的 if-else 链。
         reply = handle_record(toks);
+    }
+    else if (cmd == "pag")
+    {
+        reply = handle_pag(toks);
     }
     else
     {
@@ -461,6 +471,15 @@ std::string ControlChannel::handle_status() const
     os << "record_enabled=false\n"
         "record_status=not_implemented\n";
 
+    /* 6) PAG 副线。 */
+    if (pag_branch_) {
+        std::string body;
+        pag_branch_->format_status(body);
+        os << body;
+    } else {
+        os << "pag_enabled=false\n";
+    }
+
     LOGI("control: status (uptime={}s, clients={})",
          secs, server_ ? server_->client_count() : -1);
     return make_ok("status", os.str());
@@ -512,4 +531,139 @@ std::string ControlChannel::handle_record(const std::vector<std::string>& toks)
     }
     LOGW("control: record command '{}' rejected: feature not implemented yet (TODO)", line);
     return make_err(line, "record_not_implemented");
+}
+
+/* ─────────────────── PAG 命令族 ────────────────────
+ * 协议：
+ *   pag get                            打印 attached/pag_file/replace_idx/replace_every
+ *   pag set-file <abs_path>            热切 .pag 资源
+ *   pag set-text <idx> <utf8...>       替换第 idx 个文本图层
+ *   pag set-replace-image <idx>        启用/禁用画中画替换；-1 = 禁用
+ *   pag set-replace-image-every <n>    节流间隔（>=1）
+ * 路径相关命令（set-file）若传入相对路径，按 cfg.config_dir/.. 解析为绝对，
+ * 与 selftest / pag_branch::configure 的解析规则保持一致。 */
+std::string ControlChannel::handle_pag(const std::vector<std::string>& toks)
+{
+    /* 还原命令行用于 reply 回显（保留所有原 token 包括空格分隔）。 */
+    std::string line;
+    for (size_t i = 0; i < toks.size(); ++i)
+    {
+        if (i) line += ' ';
+        line += toks[i];
+    }
+
+    if (!pag_branch_)
+    {
+        return make_err(line, "pag_disabled");
+    }
+    if (toks.size() < 2)
+    {
+        return make_err(line, "missing_subcommand");
+    }
+
+    const std::string& sub = toks[1];
+
+    if (sub == "get")
+    {
+        auto s = pag_branch_->snapshot();
+        std::string body;
+        body.append("attached=").append(s.attached ? "true" : "false").append("\n");
+        body.append("type=").append(s.type).append("\n");
+        body.append("pag_file=").append(s.pag_file).append("\n");
+        body.append("replace_idx=").append(std::to_string(s.replace_idx)).append("\n");
+        body.append("replace_every=").append(std::to_string(s.replace_every)).append("\n");
+        return make_ok(line, body);
+    }
+
+    if (sub == "set-file")
+    {
+        if (toks.size() != 3)
+        {
+            return make_err(line, "usage_pag_set_file");
+        }
+        /* 相对路径解析：复用 main.cpp 的规则——以 cfg.config_dir/.. 为基目录。
+         * cfg_ 为 nullptr 时无法解析相对路径，要求传绝对。 */
+        std::string path = toks[2];
+        if (!std::filesystem::path(path).is_absolute())
+        {
+            if (!cfg_)
+            {
+                return make_err(line, "need_absolute_path");
+            }
+            path = (std::filesystem::path(cfg_->config_dir) / ".." / path)
+                       .lexically_normal().string();
+        }
+        std::string err;
+        bool ok = pag_branch_->set_pag_file(path, err);
+        return ok ? make_ok(line, "path=" + path)
+                  : make_err(line, err.empty() ? "apply_failed" : err);
+    }
+
+    if (sub == "set-text")
+    {
+        if (toks.size() < 4)
+        {
+            return make_err(line, "usage_pag_set_text");
+        }
+        int idx;
+        try { idx = std::stoi(toks[2]); }
+        catch (...) { return make_err(line, "invalid_idx"); }
+        /* toks[3..] 用单空格拼回去——FIFO 端原始协议已经 trim 过外侧空白，
+         * 内部多空格信息会丢；如有强需求请改用 raw 命令。 */
+        std::string utf8;
+        for (size_t i = 3; i < toks.size(); ++i)
+        {
+            if (i > 3) utf8 += ' ';
+            utf8 += toks[i];
+        }
+        std::string err;
+        bool ok = pag_branch_->set_text(idx, utf8, err);
+        return ok ? make_ok(line, "idx=" + std::to_string(idx))
+                  : make_err(line, err.empty() ? "apply_failed" : err);
+    }
+
+    if (sub == "set-replace-image")
+    {
+        if (toks.size() != 3)
+        {
+            return make_err(line, "usage_pag_set_replace_image");
+        }
+        int idx;
+        try { idx = std::stoi(toks[2]); }
+        catch (...) { return make_err(line, "invalid_idx"); }
+        /* 严格路由：该子命令仅 PagEffect 类型可用。
+         * sticker 实例上调用会返 not_supported_in_sticker，
+         * 上层脱响应 dynamic_cast 失败详细原因。 */
+        auto* eff = dynamic_cast<PagEffect*>(pag_branch_);
+        if (!eff)
+        {
+            return make_err(line, "not_supported_in_sticker");
+        }
+        std::string err;
+        bool ok = eff->set_replace_image_idx(idx, err);
+        return ok ? make_ok(line, "idx=" + std::to_string(idx))
+                  : make_err(line, err.empty() ? "apply_failed" : err);
+    }
+
+    if (sub == "set-replace-image-every")
+    {
+        if (toks.size() != 3)
+        {
+            return make_err(line, "usage_pag_set_replace_image_every");
+        }
+        int every;
+        try { every = std::stoi(toks[2]); }
+        catch (...) { return make_err(line, "invalid_value"); }
+        auto* eff = dynamic_cast<PagEffect*>(pag_branch_);
+        if (!eff)
+        {
+            return make_err(line, "not_supported_in_sticker");
+        }
+        std::string err;
+        bool ok = eff->set_replace_image_every(every, err);
+        return ok ? make_ok(line, "every=" + std::to_string(every))
+                  : make_err(line, err.empty() ? "apply_failed" : err);
+    }
+
+    return make_err(line, "unknown_subcommand");
 }

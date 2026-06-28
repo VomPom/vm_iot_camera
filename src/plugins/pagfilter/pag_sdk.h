@@ -11,7 +11,7 @@
 //          - ON  ：pag_sdk.cpp 调真 libpag（pag/pag.h、libpag::pag）；
 //          - OFF ：pag_sdk.cpp 仅返回固定字符串与 nullptr 状态，主二进制
 //                  不引入 libpag 依赖；
-//     3) Stage 4.1 起新增 pag_sdk::Engine，把 PAGFile / PAGSurface / PAGPlayer
+//     3) pag_sdk::Engine 把 PAGFile / PAGSurface / PAGPlayer
 //        三件套封到 pimpl 后面，外面只看 RGBA 像素接口。gstpagfilter 永远
 //        看不见 libpag 类型。
 //
@@ -41,11 +41,11 @@ bool is_enabled();
 std::string sdk_version();
 
 /* 自检：尝试加载 .pag 文件并打印宽 / 高 / 时长。
- * Stage 3 引入；Stage 4 起 gstpagfilter 不再直接调它，统一走 Engine。
- * 但 main.cpp 启动期保留这条路径作为冒烟检查。 */
+ * gstpagfilter 运行期不调它，统一走 Engine；
+ * main.cpp 启动期保留这条路径作为冒烟检查。 */
 bool selftest_load(const std::string& pag_file_path);
 
-/* ─────────────────────── Stage 4.1：Engine 抽象 ───────────────────────
+/* ─────────────────────── Engine 抽象 ───────────────────────
  * 一个 Engine 封装一组「PAGFile + PAGSurface + PAGPlayer」，离屏渲染到
  * RGBA8888（Premultiplied）。生命周期与所在 GstElement 实例 1:1 绑定。
  *
@@ -54,7 +54,7 @@ bool selftest_load(const std::string& pag_file_path);
  * Impl 把所有 libpag 类型藏到 .cpp 里，对外只暴露 POD 输入输出。
  *
  * 关闭分支（VM_IOT_ENABLE_LIBPAG=OFF）：Make() 永远返回 nullptr，从而
- * 让调用方代码（gstpagfilter / tools/pag_offscreen_dump）走 passthrough/退化
+ * 让调用方代码（gstpagfilter）走 passthrough/退化
  * 路径而无需 #ifdef 分支。 */
 class Engine {
 public:
@@ -68,7 +68,7 @@ public:
     ~Engine();
 
     /* 返回 PAGFile 原始尺寸（来自 .pag 元信息），不是 Surface 尺寸。
-     * Stage 4.3 里 gstpagfilter 用它判断是否需要 PAGScaleMode。 */
+     * gstpagfilter 用它判断是否需要 PAGScaleMode。 */
     int  pag_width() const;
     int  pag_height() const;
 
@@ -91,6 +91,42 @@ public:
     bool render_frame_rgba(double progress01,
                            void*  dst_rgba_premul,
                            size_t row_bytes);
+
+    /* ─────────────────── 图层替换 API ───────────────────
+     * 所有 replace_* 仅修改 PAGFile 内部图层引用，对下一次 render_frame_rgba
+     * 生效；调用方仍要负责按业务节奏推 progress。
+     *
+     * 线程模型：与 render_frame_rgba 同一调用线程（streaming 线程）。
+     * 跨线程调用的同步由更上层（pagfilter）负责。 */
+
+    /* 当前 PAG 文件中的可编辑文本图层数量。
+     * stub 分支永远返回 0；真分支返回 PAGFile::numTexts()。 */
+    int num_texts() const;
+
+    /* 当前 PAG 文件中的图像占位图层数量（image placeholder）。
+     * stub 分支永远返回 0；真分支返回 PAGFile::numImages()。 */
+    int num_images() const;
+
+    /* 把第 idx 个文本图层替换为给定 UTF-8 字符串。
+     * 越界 / stub 分支 / libpag 内部失败时返回 false（仅 LOGW 不抛）。
+     * 仅修改 text 字段，字体/字号/颜色保留 PAG 内既有设置。 */
+    bool replace_text(int idx, const std::string& utf8);
+
+    /* 把第 idx 个图像占位图层替换为给定 RGBA8888 像素帧。
+     * rgba_data 必须按 row_bytes × height 字节布局，row_bytes >= width*4。
+     * alpha 语义：opaque（不参与 PAG 内 alpha 混合，PAG 自己按图层 mask 处理）。
+     *
+     * 实现说明：内部用 PAGImage::FromPixels 复制一份像素到 libpag 管理的
+     * 内存，调用返回后 rgba_data 可立即被复用/释放。**频繁替换**会触发
+     * libpag 内部纹理重建，调用方应自行限频（pagfilter 已有
+     * pag-replace-image-every 节流）。
+     *
+     * 越界 / 参数非法 / stub 分支 / 内部失败时返回 false。 */
+    bool replace_image_from_rgba(int           idx,
+                                 const void*   rgba_data,
+                                 int           width,
+                                 int           height,
+                                 size_t        row_bytes);
 
 private:
     Engine();  /* 禁止外部直接 new，统一走 Make */

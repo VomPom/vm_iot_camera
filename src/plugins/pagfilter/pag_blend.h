@@ -2,14 +2,14 @@
 // Created by vompom on 2026/06/21.
 //
 // @Description
-//   Stage 4.2：把一帧 RGBA（premultiplied alpha）画面合成到一帧 I420 上的
+//   把一帧 RGBA（premultiplied alpha）画面合成到一帧 I420 上的
 //   纯算法模块。
 //
 //   设计动机：
 //     - blend 跟 GstBuffer / stride / VideoInfo 强相关，但与 libpag / GStreamer
 //       的对象生命周期无关。把它独立出来后：
 //         · 单测可在 host 上裸调，不需要 gst_init / pag_sdk；
-//         · gstpagfilter（Stage 4.3）只负责拿到 plane 指针 + 行距 + RGBA 缓冲，
+//         · gstpagfilter 只负责拿到 plane 指针 + 行距 + RGBA 缓冲，
 //           直接调一次 blend_rgba_premul_over_i420(...) 即可。
 //
 //   像素格式契约：
@@ -39,8 +39,7 @@
 //
 //   性能：
 //     - 标量 C++ 实现，720p × 720p 全覆盖在树莓派 4B aarch64 单核上预计
-//       2–4 ms / 帧（30 fps 占用 6–12% 单核）。SIMD 优化留待 Stage 4.4
-//       或必要时再做。
+//       2–4 ms / 帧（30 fps 占用 6–12% 单核）。SIMD 优化可按需后续补。
 //
 
 #ifndef VM_IOT_PAG_BLEND_H

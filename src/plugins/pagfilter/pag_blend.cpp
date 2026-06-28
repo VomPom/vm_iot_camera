@@ -133,7 +133,7 @@ bool blend_rgba_premul_over_i420(const RgbaPremulFrame& src,
      * 视作 src.a = 0（即只保留 dst），等价于不动。
      *
      * 简化策略：把 copy 区域向下取整到偶数对齐，奇数行/列丢弃。这会在
-     * src 宽/高为奇数时丢失最右/最下一行像素。Stage 4.3 的 PAG 渲染
+     * src 宽/高为奇数时丢失最右/最下一行像素。当前 PAG 渲染
      * Surface 尺寸由我们自己控制（一般 ≤ 720×720 且取偶数），此简化
      * 不会触发；如未来需支持奇数 src，再扩展。 */
     int x0_src = copy_x0;

@@ -3,7 +3,7 @@
 //
 // @Description
 //   PipelineBuilder：根据 Config 拼装 gst-rtsp-server 的 launch 字符串。
-//   Stage 3 起接入 V4L2Prober + CapsRanker：上游 caps 由设备真实能力决定，
+//   接入 V4L2Prober + CapsRanker：上游 caps 由设备真实能力决定，
 //   下游强制收敛到 cfg.capture.pixfmt，避免硬写死与设备不匹配的参数。
 //
 

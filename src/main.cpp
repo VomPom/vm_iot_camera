@@ -4,8 +4,11 @@
 #include "shader_filter.h"
 #include "branch_base.h"
 #include "snapshot.h"
-#include "pag_overlay.h"
+#include "pag_branch.h"
+#include "pag_sticker.h"
+#include "pag_effect.h"
 #include "control_channel.h"
+#include <memory>
 #include "log.h"
 #include "v4l2_prober.h"
 #include "gstpagfilter.h"
@@ -26,11 +29,11 @@ static std::string extract_config_path(int argc, char** argv) {
         std::string a = argv[i];
         if (a == "-c" || a == "--config") return argv[i + 1];
     }
-    return "config/default.yaml";
+    return "assets/config/default.yaml";
 }
 
 int main(int argc, char** argv) {
-    /* Stage 4.4 后续修复（headless Pi EGL 兼容）：
+    /* headless Pi EGL 兼容：
      *
      * 树莓派/Ubuntu 在没有 X/Wayland 会话时，Mesa 的 EGL 默认平台会按
      * `DISPLAY` 推断到 x11 后端，导致 libpag 内部 `eglInitialize` /
@@ -78,7 +81,7 @@ int main(int argc, char** argv) {
     LOGI("pagfilter: enabled={} selftest={} file='{}'",
          cfg.filter.pag.enabled, cfg.filter.pag.selftest, cfg.filter.pag.file);
 
-    /* Stage 3：PAG SDK 版本日志 + 按需 selftest。
+    /* PAG SDK 版本日志 + 按需 selftest。
      * - 版本日志总是打印一次，便于排查"线上跑的到底是 stub 还是真 libpag"；
      * - selftest 仅在 cfg.filter.pag.selftest=true 时执行，独立于 pipeline。
      *   传入的路径若为相对路径，与 shaders 同样以 cfg.config_dir/.. 为基目录解析，
@@ -140,12 +143,18 @@ int main(int argc, char** argv) {
      * 时帮它 attach。输出目录 / 质量 / 超时都由 cfg.snapshot 供给。 */
     snapshot.configure(cfg.snapshot.dir, cfg.snapshot.quality, cfg.snapshot.timeout_ms);
 
-    /* PAG 叠加副线（Stage 4.4）：仅在 cfg.filter.pag.enabled=true 时启用。
+    /* PAG 副线：仅在 cfg.filter.pag.enabled=true 时启用。
      * PipelineBuilder 已经在主线 raw 段插入 `pagfilter name=pag0`，本模块
      * 负责在 media-configure 时把绝对化后的 pag-file 一次性注入到该元素。
+     *
+     * 启动期按 cfg.filter.pag.type 选具体子类：
+     *   - PagType::Sticker   -> PagSticker（视频叠加，支持 position/scale）
+     *   - PagType::PagEffect -> PagEffect （视频替换轨道，支持 replace-image-*）
+     * 上层只持 PagBranch* 句柄；ControlChannel 用 dynamic_cast 做差异化命令分发。
+     *
      * 路径解析与 selftest / shaders 一致：相对路径以 cfg.config_dir/.. 为基目录，
      * 保证从仓库根 / build 目录两种工作目录启动时都找得到资源。 */
-    PagOverlay pag_overlay;
+    std::unique_ptr<PagBranch> pag_branch;
     if (cfg.filter.pag.enabled) {
         std::string pag_path = cfg.filter.pag.file;
         if (!pag_path.empty() &&
@@ -153,18 +162,23 @@ int main(int argc, char** argv) {
             pag_path = (std::filesystem::path(cfg.config_dir) / ".." / pag_path)
                            .lexically_normal().string();
         }
-        pag_overlay.configure(pag_path);
+        if (cfg.filter.pag.type == PagType::PagEffect) {
+            pag_branch = std::make_unique<PagEffect>();
+        } else {
+            pag_branch = std::make_unique<PagSticker>();
+        }
+        pag_branch->configure(cfg.filter.pag, pag_path);
     }
 
     /* 把所有 branch 实例统一成 BranchBase* 列表交给 RtspServer。
      * 顺序无强约束（每个 branch 抓自己的命名元素，互不干扰）；未来新增 detect / cloud_upload
      * 之类副线时只需在此 push 一个新对象，RtspServer 不用改。
-     * pag_overlay 仅在 filter.pag.enabled=true 时入列：pipeline 里没有 pag0 元素时
+     * pag_branch 仅在 filter.pag.enabled=true 时入列：pipeline 里没有 pag0 元素时
      * BranchBase 会 warn 一行然后无害跳过，但提前过滤可以让日志更干净。
      */
     std::vector<BranchBase*> branches{&snapshot};
-    if (cfg.filter.pag.enabled) {
-        branches.push_back(&pag_overlay);
+    if (pag_branch) {
+        branches.push_back(pag_branch.get());
     }
 
     if (!server.start(cfg, cfg.filter.enabled ? &filter : nullptr, branches))
@@ -184,6 +198,7 @@ int main(int argc, char** argv) {
                &cfg,
                &server,
                &snapshot,
+               pag_branch.get(),
                start_time);
 
     g_main_loop_run(loop);             // 阻塞，SIGINT/SIGTERM 退出
@@ -194,7 +209,9 @@ int main(int argc, char** argv) {
      *   3) 最后停 RtspServer / filter：释放 server 与共享资源。 */
     ctrl.stop();
     snapshot.shutdown();
-    pag_overlay.shutdown();
+    if (pag_branch) {
+        pag_branch->shutdown();
+    }
     server.stop();
     filter.shutdown();
     g_main_loop_unref(loop);

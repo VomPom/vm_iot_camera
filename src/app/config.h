@@ -20,7 +20,7 @@ struct ServerConfig {
 /*
  * 摄像头采集配置。
  *
- * 字段语义（自 Stage 3 起重新解释）：
+ * 字段语义：
  *   - width / height / framerate：用户「期望」参数，用于在启动期与设备
  *     真实能力做评分匹配（V4L2Prober + CapsRanker）；不再要求设备必须
  *     精确支持这套参数。
@@ -52,18 +52,48 @@ struct LogConfig {
 
 /* PAG 滤镜（自研 GStreamer 元素 pagfilter）的配置。
  *
- * 当前形态：enabled=true 时仅在 pipeline 中插入一个 passthrough 元素，
- *           不修改任何像素；selftest=true 时启动期一次性调用 libpag 加载
+ * 当前形态：enabled=true 时在 pipeline 中插入 pagfilter，并根据 file
+ *           加载 .pag 资产、alpha-blend 到主线画面（运行期亦可热切）；
+ *           file 为空时 pagfilter 仍在管线中，但退化为 passthrough，不修改像素。
+ *           selftest=true 时启动期一次性调用 libpag 加载
  *           file 指向的 .pag 文件并打印元信息，证明 SDK 编译/链接通。
  *           selftest 独立于 enabled，即使 enabled=false 也会执行，
  *           便于在不影响 pipeline 的情况下单独验证 SDK。
- *           Stage 4 起 pagfilter 才会真正渲染 .pag 到画面上。
+ *
+ * type 字段：
+ *   - Sticker  ：常规贴纸，PAG 整张画布按 (position, scale) 叠加到画面上；
+ *                position / scale 仅此模式生效。
+ *   - PagEffect：视频替换轨道（把当前画面塞进 PAG 视频图层），未实现，
+ *                配置上预留分路，运行期一律 passthrough（pagfilter 内部
+ *                打印一次 WARN 日志后跳过本帧渲染）。
  *
  * 默认 enabled=false，确保现网行为不变。 */
+enum class PagType {
+    Sticker,    // 默认：常规贴纸，position / scale 生效
+    PagEffect,  // 视频替换轨道，占坑未实现
+};
+
+const char* to_string(PagType t);
+PagType     pag_type_from_str(const std::string& s, PagType fallback);
+
 struct PagFilterConfig {
     bool        enabled  = false;                    // 总开关；false 时不在 pipeline 插入 pagfilter
     bool        selftest = false;                    // true 时启动期尝试加载 file 并打印元信息
+    PagType     type     = PagType::Sticker;         // sticker | pageffect；默认 sticker
     std::string file;                                // .pag 素材路径；相对路径以 config_dir/.. 为基目录
+
+    /* position：PAG 画布中心对齐到画面的归一化坐标。
+     *   坐标系：画面左上=(0,0)，右下=(1,1)；(0.5,0.5) 表示居中。
+     *   允许 (-2.0, 3.0)，便于做"飞入飞出"动画；越界会被 clamp + warn。
+     *   仅 type=Sticker 生效；PagEffect 模式下读取但忽略。 */
+    float       pos_x    = 0.5f;
+    float       pos_y    = 0.5f;
+
+    /* scale：PAG 画布整体等比缩放。1.0=与画面同尺寸（PAG Surface 创建时
+     *   按画面尺寸渲染），0.5=半尺寸，2.0=两倍尺寸（超出画面部分自动裁剪）。
+     *   允许 (0.01, 8.0]，越界 clamp + warn。
+     *   仅 type=Sticker 生效；PagEffect 模式下读取但忽略。 */
+    float       scale    = 1.0f;
 };
 
 struct FilterConfig {
