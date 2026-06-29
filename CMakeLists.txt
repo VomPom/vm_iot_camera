@@ -12,8 +12,25 @@ pkg_check_modules(GST REQUIRED IMPORTED_TARGET
         gstreamer-1.0
         gstreamer-base-1.0
         gstreamer-video-1.0
+        gstreamer-audio-1.0
         gstreamer-rtsp-1.0
         gstreamer-rtsp-server-1.0)
+
+# ---- 音频通道（capture/encode/RTP）开关 ----
+# 默认 ON：编译进可执行文件；OFF 时 audio_branch / alsa_prober / pipeline_builder
+# 内的音频段都被 #if VM_IOT_ENABLE_AUDIO=0 短路，二进制运行行为与改造前一致。
+# 运行期还有 cfg.audio.enabled 第二级开关，二者任一关闭即不接入音频。
+option(VM_IOT_ENABLE_AUDIO "Enable audio capture/encode/RTP path" ON)
+message(STATUS "VM_IOT_ENABLE_AUDIO=${VM_IOT_ENABLE_AUDIO}")
+
+# alsa-lib 仅 alsa_prober.cpp 需要：用 snd_pcm_open(O_NONBLOCK) 验证设备可用。
+# 缺包时退化为读 /proc/asound/cards 的弱检查，不影响构建。
+pkg_check_modules(ALSA IMPORTED_TARGET alsa)
+if (ALSA_FOUND)
+    message(STATUS "alsa-lib: ${ALSA_VERSION}")
+else ()
+    message(STATUS "alsa-lib not found, alsa_prober falls back to /proc/asound check")
+endif ()
 
 find_package(yaml-cpp REQUIRED)
 find_package(spdlog REQUIRED)
@@ -41,6 +58,7 @@ target_include_directories(vm_iot
         src/branches
         src/branches/snapshot
         src/branches/pag
+        src/branches/audio
         src/control
         src/rtsp
         src/util
@@ -50,6 +68,19 @@ target_include_directories(vm_iot
 
 target_link_libraries(vm_iot PUBLIC
         PkgConfig::GST yaml-cpp spdlog::spdlog Threads::Threads)
+
+# 音频开关透传到代码层。
+if (VM_IOT_ENABLE_AUDIO)
+    target_compile_definitions(vm_iot PRIVATE VM_IOT_ENABLE_AUDIO=1)
+    if (ALSA_FOUND)
+        target_compile_definitions(vm_iot PRIVATE VM_IOT_HAVE_ALSA_LIB=1)
+        target_link_libraries(vm_iot PUBLIC PkgConfig::ALSA)
+    else ()
+        target_compile_definitions(vm_iot PRIVATE VM_IOT_HAVE_ALSA_LIB=0)
+    endif ()
+else ()
+    target_compile_definitions(vm_iot PRIVATE VM_IOT_ENABLE_AUDIO=0 VM_IOT_HAVE_ALSA_LIB=0)
+endif ()
 
 # ---- libpag ----
 # 目标平台只考虑树莓派 aarch64 Debian/Raspbian。其他平台请自行扩展。

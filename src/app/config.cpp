@@ -11,6 +11,7 @@
 #include <yaml-cpp/yaml.h>
 #include <getopt.h>
 #include <string>
+#include <vector>
 #include <filesystem>
 #include <functional>
 #include <unordered_map>
@@ -41,6 +42,64 @@ PagType pag_type_from_str(const std::string& s, PagType fallback) {
     spdlog::warn("filter.pag.type='{}' unknown, fallback to '{}'",
                  s, to_string(fallback));
     return fallback;
+}
+
+/* ──────────── Audio 枚举 ↔ string ────────────
+ * 与 yaml 字面量共享；PipelineBuilder 拼 launch 时也会复用这些字串不再另写。 */
+const char* to_string(AudioCaptureBackend b) {
+    switch (b) {
+        case AudioCaptureBackend::Alsa:  return "alsa";
+        case AudioCaptureBackend::Pulse: return "pulse";
+    }
+    return "alsa";
+}
+const char* to_string(AudioEncoderBackend b) {
+    switch (b) {
+        case AudioEncoderBackend::AAC:  return "aac";
+        case AudioEncoderBackend::Opus: return "opus";
+    }
+    return "aac";
+}
+const char* to_string(AudioAacImpl i) {
+    switch (i) {
+        case AudioAacImpl::VoAac: return "voaacenc";
+        case AudioAacImpl::AvEnc: return "avenc_aac";
+    }
+    return "voaacenc";
+}
+
+namespace {
+std::string lower(const std::string& s) {
+    std::string r; r.reserve(s.size());
+    for (char c : s) r.push_back(static_cast<char>(::tolower(c)));
+    return r;
+}
+} // namespace
+
+AudioCaptureBackend audio_capture_backend_from_str(const std::string& s, AudioCaptureBackend fb) {
+    const std::string l = lower(s);
+    if (l == "alsa")  return AudioCaptureBackend::Alsa;
+    if (l == "pulse") {
+        spdlog::warn("audio.capture.backend='pulse' not implemented yet, fallback to '{}'",
+                     to_string(fb));
+        return fb;
+    }
+    spdlog::warn("audio.capture.backend='{}' unknown, fallback to '{}'", s, to_string(fb));
+    return fb;
+}
+AudioEncoderBackend audio_encoder_backend_from_str(const std::string& s, AudioEncoderBackend fb) {
+    const std::string l = lower(s);
+    if (l == "aac")  return AudioEncoderBackend::AAC;
+    if (l == "opus") return AudioEncoderBackend::Opus;
+    spdlog::warn("audio.encoder.backend='{}' unknown, fallback to '{}'", s, to_string(fb));
+    return fb;
+}
+AudioAacImpl audio_aac_impl_from_str(const std::string& s, AudioAacImpl fb) {
+    const std::string l = lower(s);
+    if (l == "voaacenc")  return AudioAacImpl::VoAac;
+    if (l == "avenc_aac") return AudioAacImpl::AvEnc;
+    spdlog::warn("audio.encoder.aac_impl='{}' unknown, fallback to '{}'", s, to_string(fb));
+    return fb;
 }
 
 Config Config::from_file(const std::string& path) {
@@ -158,6 +217,66 @@ Config Config::from_file(const std::string& path) {
     // TODO(record): 录像功能暂未实现，YAML 中的 record 节点会被静默忽略。
     //               未来恢复时在此重新读取 record.enabled / dir / segment_sec / filename_pattern。
 
+    /* ──────────── audio.* ────────────
+     * 路径：yaml audio:{enabled,capture,encoder,control}，与视频 capture/encoder 平行。
+     * 默认 enabled=false：旧部署不写 audio: 节 → 与改造前 100% 一致。
+     * 枚举字段不合法时 from_str 内部 warn 后 fallback，不报错退出。 */
+    if (auto a = n["audio"]) {
+        c.audio.enabled = a["enabled"].as<bool>(c.audio.enabled);
+
+        if (auto cap = a["capture"]) {
+            if (cap["backend"]) {
+                c.audio.capture.backend = audio_capture_backend_from_str(
+                    cap["backend"].as<std::string>(""), c.audio.capture.backend);
+            }
+            c.audio.capture.device       = cap["device"      ].as<std::string>(c.audio.capture.device);
+            c.audio.capture.samplerate   = cap["samplerate"  ].as<int>        (c.audio.capture.samplerate);
+            c.audio.capture.channels     = cap["channels"    ].as<int>        (c.audio.capture.channels);
+            c.audio.capture.do_timestamp = cap["do_timestamp"].as<bool>       (c.audio.capture.do_timestamp);
+        }
+        if (auto e = a["encoder"]) {
+            if (e["backend"]) {
+                c.audio.encoder.backend = audio_encoder_backend_from_str(
+                    e["backend"].as<std::string>(""), c.audio.encoder.backend);
+            }
+            if (e["aac_impl"]) {
+                c.audio.encoder.aac_impl = audio_aac_impl_from_str(
+                    e["aac_impl"].as<std::string>(""), c.audio.encoder.aac_impl);
+            }
+            c.audio.encoder.bitrate_kbps = e["bitrate_kbps"].as<int>(c.audio.encoder.bitrate_kbps);
+        }
+        if (auto ctl = a["control"]) {
+            c.audio.control.volume = ctl["volume"].as<float>(c.audio.control.volume);
+            c.audio.control.mute   = ctl["mute"  ].as<bool> (c.audio.control.mute);
+        }
+
+        /* 取值合法性校验：越界 clamp + warn，与 filter.pag.* 风格一致。 */
+        const std::vector<int> kAllowedRates = {8000, 16000, 22050, 32000, 44100, 48000};
+        if (std::find(kAllowedRates.begin(), kAllowedRates.end(),
+                      c.audio.capture.samplerate) == kAllowedRates.end()) {
+            spdlog::warn("audio.capture.samplerate={} not in {{8000,16000,22050,32000,44100,48000}},"
+                         " reset to 48000",
+                         c.audio.capture.samplerate);
+            c.audio.capture.samplerate = 48000;
+        }
+        if (c.audio.capture.channels != 1 && c.audio.capture.channels != 2) {
+            spdlog::warn("audio.capture.channels={} not in {{1,2}}, reset to 2",
+                         c.audio.capture.channels);
+            c.audio.capture.channels = 2;
+        }
+        if (c.audio.encoder.bitrate_kbps < 8 || c.audio.encoder.bitrate_kbps > 512) {
+            spdlog::warn("audio.encoder.bitrate_kbps={} out of [8,512], clamped",
+                         c.audio.encoder.bitrate_kbps);
+            c.audio.encoder.bitrate_kbps = std::max(8, std::min(512, c.audio.encoder.bitrate_kbps));
+        }
+        if (!(c.audio.control.volume >= 0.0f && c.audio.control.volume <= 10.0f)) {
+            spdlog::warn("audio.control.volume={} out of [0,10], clamped",
+                         c.audio.control.volume);
+            c.audio.control.volume = std::max(0.0f, std::min(10.0f,
+                std::isnan(c.audio.control.volume) ? 1.0f : c.audio.control.volume));
+        }
+    }
+
     return c;
 }
 
@@ -234,6 +353,20 @@ const std::unordered_map<std::string, Setter>& setters() {
         {"snapshot.dir",         [](Config& c, const std::string& v){ c.snapshot.dir         = v; }},
         {"snapshot.quality",     [](Config& c, const std::string& v){ c.snapshot.quality     = parse_int(v, "snapshot.quality"); }},
         {"snapshot.timeout_ms",  [](Config& c, const std::string& v){ c.snapshot.timeout_ms  = parse_int(v, "snapshot.timeout_ms"); }},
+
+        /* audio.*：CLI 只暴露最常用的几个（启动期 volume / mute / enabled）；
+         * 其余参数走 yaml，避免 flag 爆炸。所有 key 路径与 yaml 一致。 */
+        {"audio.enabled",                [](Config& c, const std::string& v){ c.audio.enabled                = parse_bool(v, "audio.enabled"); }},
+        {"audio.capture.backend",        [](Config& c, const std::string& v){ c.audio.capture.backend        = audio_capture_backend_from_str(v, c.audio.capture.backend); }},
+        {"audio.capture.device",         [](Config& c, const std::string& v){ c.audio.capture.device         = v; }},
+        {"audio.capture.samplerate",     [](Config& c, const std::string& v){ c.audio.capture.samplerate     = parse_int(v, "audio.capture.samplerate"); }},
+        {"audio.capture.channels",       [](Config& c, const std::string& v){ c.audio.capture.channels       = parse_int(v, "audio.capture.channels"); }},
+        {"audio.capture.do_timestamp",   [](Config& c, const std::string& v){ c.audio.capture.do_timestamp   = parse_bool(v, "audio.capture.do_timestamp"); }},
+        {"audio.encoder.backend",        [](Config& c, const std::string& v){ c.audio.encoder.backend        = audio_encoder_backend_from_str(v, c.audio.encoder.backend); }},
+        {"audio.encoder.aac_impl",       [](Config& c, const std::string& v){ c.audio.encoder.aac_impl       = audio_aac_impl_from_str(v, c.audio.encoder.aac_impl); }},
+        {"audio.encoder.bitrate_kbps",   [](Config& c, const std::string& v){ c.audio.encoder.bitrate_kbps   = parse_int(v, "audio.encoder.bitrate_kbps"); }},
+        {"audio.control.volume",         [](Config& c, const std::string& v){ c.audio.control.volume         = parse_float(v, "audio.control.volume"); }},
+        {"audio.control.mute",           [](Config& c, const std::string& v){ c.audio.control.mute           = parse_bool(v, "audio.control.mute"); }},
 
         // TODO(record): 录像功能暂未实现，原 record.enabled / dir / segment_sec / filename_pattern
         //               setter 已从表中移除。未来重新接入时请同时恢复本表与 from_file 中的解析。

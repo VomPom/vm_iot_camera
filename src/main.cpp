@@ -7,10 +7,12 @@
 #include "pag_branch.h"
 #include "pag_sticker.h"
 #include "pag_effect.h"
+#include "audio_branch.h"
 #include "control_channel.h"
 #include <memory>
 #include "log.h"
 #include "v4l2_prober.h"
+#include "alsa_prober.h"
 #include "gstpagfilter.h"
 #include "pag_sdk.h"
 #include <gst/gst.h>
@@ -123,6 +125,29 @@ int main(int argc, char** argv) {
         return 3;
     }
 
+    /* 音频设备预检：仅 cfg.audio.enabled=true 时生效。
+     * 与摄像头检查同风格：人类可读错误 + 退出码 5。 */
+    if (cfg.audio.enabled &&
+        !alsa_prober::device_accessible(cfg.audio.capture.device))
+    {
+        LOGE("audio device '{}' not accessible",
+             cfg.audio.capture.device);
+        std::fprintf(stderr,
+                     "\n"
+                     "=============================================\n"
+                     "  ERROR: Audio device not accessible\n"
+                     "  Device: %s\n"
+                     "=============================================\n"
+                     "  → Is the microphone plugged in?\n"
+                     "  → Try `arecord -l` to list ALSA cards.\n"
+                     "  → Try `cat /proc/asound/cards`.\n"
+                     "  → Permission? (sudo usermod -aG audio $USER && re-login)\n"
+                     "  → Or set audio.enabled=false in yaml to disable audio.\n"
+                     "=============================================\n\n",
+                     cfg.audio.capture.device.c_str());
+        return 5;
+    }
+
     GMainLoop* loop = g_main_loop_new(nullptr, FALSE);
     install_signals(loop);
 
@@ -170,15 +195,25 @@ int main(int argc, char** argv) {
         pag_branch->configure(cfg.filter.pag, pag_path);
     }
 
+    /* 音频副线：仅在 cfg.audio.enabled=true 时启用。
+     * PipelineBuilder 已在同一组 ( ... ) 内拼出并行的音频主链，本模块在
+     * media-configure 时抳 aud_vol / aud_valve 并应用启动期 volume / mute。 */
+    std::unique_ptr<AudioBranch> audio_branch;
+    if (cfg.audio.enabled) {
+        audio_branch = std::make_unique<AudioBranch>();
+        audio_branch->configure(cfg.audio);
+    }
+
     /* 把所有 branch 实例统一成 BranchBase* 列表交给 RtspServer。
      * 顺序无强约束（每个 branch 抓自己的命名元素，互不干扰）；未来新增 detect / cloud_upload
      * 之类副线时只需在此 push 一个新对象，RtspServer 不用改。
-     * pag_branch 仅在 filter.pag.enabled=true 时入列：pipeline 里没有 pag0 元素时
-     * BranchBase 会 warn 一行然后无害跳过，但提前过滤可以让日志更干净。
-     */
+     * pag_branch 仅在 filter.pag.enabled=true 时入列：audio_branch 同理。 */
     std::vector<BranchBase*> branches{&snapshot};
     if (pag_branch) {
         branches.push_back(pag_branch.get());
+    }
+    if (audio_branch) {
+        branches.push_back(audio_branch.get());
     }
 
     if (!server.start(cfg, cfg.filter.enabled ? &filter : nullptr, branches))
@@ -199,6 +234,7 @@ int main(int argc, char** argv) {
                &server,
                &snapshot,
                pag_branch.get(),
+               audio_branch.get(),
                start_time);
 
     g_main_loop_run(loop);             // 阻塞，SIGINT/SIGTERM 退出
@@ -211,6 +247,9 @@ int main(int argc, char** argv) {
     snapshot.shutdown();
     if (pag_branch) {
         pag_branch->shutdown();
+    }
+    if (audio_branch) {
+        audio_branch->shutdown();
     }
     server.stop();
     filter.shutdown();

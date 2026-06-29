@@ -88,3 +88,74 @@ TEST(MakeInputCaps, RawWithoutFormatFalls) {
     EXPECT_EQ(s.find(",format="), std::string::npos)
         << "raw_format 为空时不应有 format= 字段，actual: " << s;
 }
+
+// =============================================================================
+// audio_encoder_str / build_audio_source_segment
+// =============================================================================
+
+namespace {
+AudioConfig make_audio(bool enabled = true,
+                       AudioEncoderBackend enc = AudioEncoderBackend::AAC,
+                       AudioAacImpl impl = AudioAacImpl::VoAac,
+                       int rate = 48000, int ch = 2, int br = 96) {
+    AudioConfig a;
+    a.enabled = enabled;
+    a.capture.samplerate = rate;
+    a.capture.channels   = ch;
+    a.capture.device     = "hw:0,0";
+    a.capture.do_timestamp = true;
+    a.encoder.backend = enc;
+    a.encoder.aac_impl = impl;
+    a.encoder.bitrate_kbps = br;
+    a.control.volume = 1.0f;
+    a.control.mute   = false;
+    return a;
+}
+} // namespace
+
+TEST(AudioEncoderStr, AacVoAac) {
+    auto a = make_audio();
+    EXPECT_EQ(PipelineBuilder::audio_encoder_str(a.encoder),
+              "voaacenc bitrate=96000");
+}
+
+TEST(AudioEncoderStr, AacAvEnc) {
+    auto a = make_audio(true, AudioEncoderBackend::AAC, AudioAacImpl::AvEnc);
+    EXPECT_EQ(PipelineBuilder::audio_encoder_str(a.encoder),
+              "avenc_aac bitrate=96000");
+}
+
+TEST(AudioEncoderStr, OpusUsesBps) {
+    auto a = make_audio(true, AudioEncoderBackend::Opus,
+                        AudioAacImpl::VoAac, 48000, 2, 64);
+    EXPECT_EQ(PipelineBuilder::audio_encoder_str(a.encoder),
+              "opusenc bitrate=64000");
+}
+
+TEST(AudioSourceSegment, IncludesRateChannelsAndDevice) {
+    auto a = make_audio();
+    auto s = PipelineBuilder::build_audio_source_segment(a);
+    EXPECT_NE(s.find("alsasrc"),               std::string::npos) << s;
+    EXPECT_NE(s.find("do-timestamp=true"),     std::string::npos) << s;
+    EXPECT_NE(s.find("device=hw:0,0"),         std::string::npos) << s;
+    EXPECT_NE(s.find("rate=48000"),            std::string::npos) << s;
+    EXPECT_NE(s.find("channels=2"),            std::string::npos) << s;
+    EXPECT_NE(s.find("audioconvert"),          std::string::npos) << s;
+    EXPECT_NE(s.find("audioresample"),         std::string::npos) << s;
+}
+
+TEST(AudioSourceSegment, EmptyDeviceOmitsDeviceField) {
+    auto a = make_audio();
+    a.capture.device.clear();
+    auto s = PipelineBuilder::build_audio_source_segment(a);
+    EXPECT_EQ(s.find("device="), std::string::npos)
+        << "device 为空串时不应写 device= 字段，actual: " << s;
+}
+
+TEST(AudioSourceSegment, MonoLowerRate) {
+    auto a = make_audio(true, AudioEncoderBackend::AAC, AudioAacImpl::VoAac,
+                        16000, 1);
+    auto s = PipelineBuilder::build_audio_source_segment(a);
+    EXPECT_NE(s.find("rate=16000"), std::string::npos) << s;
+    EXPECT_NE(s.find("channels=1"), std::string::npos) << s;
+}

@@ -58,6 +58,32 @@ snapshot:
   dir: /tmp/vm_iot/snapshots          # 默认输出目录；snapshot 命令未带 path 时使用
   quality: 90                         # JPEG 质量（预留，当前 jpegenc 未启用）
   timeout_ms: 1500                    # 单次截图等待 buffer 落盘超时
+
+# 音频通道（capture/encode/RTP）。enabled=false 时 pipeline 不插入任何音频段，
+# 行为与改造前 100% 一致；enabled=true 时与视频通道并行接入：
+#   alsasrc → caps → audioconvert/resample → volume(aud_vol) → valve(aud_valve)
+#         → tee(at) → encoder → aacparse?(opus 跳过) → tee(enc_at) → rtp pay(pay1)
+# 编码 backend=aac 时 RTP 走 rtpmp4apay；backend=opus 时走 rtpopuspay。
+# RTSP SDP 自动两路（pay0=video, pay1=audio）。
+audio:
+  enabled: true                     # 总开关；保旧行为默认 false，确认麦克风可用后再切 true
+  capture:
+    backend: alsa                     # alsa | pulse（pulse 占坑，未实现 → fallback alsa）
+    # 设备名建议先用 `arecord -l` / `cat /proc/asound/cards` 确认。
+    # 常见取值：hw:0,0  / hw:1,0 / plughw:CARD=USB,DEV=0 / 空串=系统默认。
+    # 注意 hw: 路径要求采集 rate/channels 必须是设备原生支持，
+    # 否则改用 plughw: 让 ALSA 自动重采样。
+    device: hw:1,0                   # alsasrc device 字符串；空串=系统默认
+    samplerate: 48000                 # 8000/16000/22050/32000/44100/48000
+    channels: 2                       # 1=mono, 2=stereo
+    do_timestamp: true                # 让 alsasrc 用 pipeline clock 打 PTS（强烈建议 true）
+  encoder:
+    backend: aac                      # aac | opus
+    aac_impl: voaacenc                # voaacenc | avenc_aac（仅 backend=aac 生效；缺包自动 fallback）
+    bitrate_kbps: 96                  # AAC 推荐 64~128；Opus 推荐 32~64
+  control:
+    volume: 1.0                       # 启动期音量，[0.0, 10.0]，PLAYING 状态可热调
+    mute: false                       # 启动期静音（valve.drop=true）
 # 规划中（暂未实现）：低分辨率检测副线，从 raw tee=t 拉，独立分辨率/帧率
 # detect:
 #   enabled: false

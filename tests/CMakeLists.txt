@@ -68,6 +68,11 @@ foreach (test_src IN LISTS VM_IOT_TEST_FILES)
     # 真集成分支（VM_IOT_ENABLE_LIBPAG=ON）由主可执行文件 vm_iot 独立验证。
     target_compile_definitions(${test_name} PRIVATE VM_IOT_ENABLE_LIBPAG=0)
 
+    # 音频通道：单测开 VM_IOT_ENABLE_AUDIO=1 让 pipeline_builder 的音频拼装路径被覆盖；
+    # alsa-lib 关：alsa_prober 走 /proc/asound 弱检查分支，无外部依赖。
+    # 单测不真起 GStreamer，仅断言 launch 字符串内容。
+    target_compile_definitions(${test_name} PRIVATE VM_IOT_ENABLE_AUDIO=1 VM_IOT_HAVE_ALSA_LIB=0)
+
     # 自动发现并注册测试用例到 CTest
     gtest_discover_tests(${test_name})
 endforeach ()

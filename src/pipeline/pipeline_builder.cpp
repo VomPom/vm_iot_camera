@@ -90,18 +90,22 @@ std::string PipelineBuilder::make_input_caps(const v4l2_prober::Capability& cap,
     return os.str();
 }
 
-/* ─────────────────────────── 管道架构总览 ───────────────────────────
+/* ────────────────────── 管道架构总览 ─────────────────────
  *
  *   build() 输出一条供 gst-rtsp-server 解析的 launch 字符串。
  *
  *   ★ 取流锚点（tee）命名约定 ★
- *     - tee name=t      → 原始 raw（cfg.capture.pixfmt 已收敛），
- *                         任何需要"像素"的副线从这里拉（snapshot / detect / motion ...）。
- *     - tee name=enc_t  → 编码后 H.264/H.265 elementary stream，
- *                         任何需要"码流"的副线从这里拉（main rtp / record ...）。
- *     新增副线必须二选一锚点，禁止再起其他 tee。
+ *     视频：
+ *       - tee name=t        → 原始 raw（cfg.capture.pixfmt 已收敛），
+ *                              任何需要"像素"的副线从这里拉（snapshot / detect / motion ...）。
+ *       - tee name=enc_t    → 编码后 H.264/H.265 elementary stream，
+ *                              任何需要"码流"的副线从这里拉（main rtp / record ...）。
+ *     音频（cfg.audio.enabled=true 才开）：
+ *       - tee name=at       → 原始 PCM（已 audioconvert/resample 收敛），未来为 ASR / level 预留。
+ *       - tee name=enc_at   → 编码后音频 ES（AAC / Opus），供 RTP pay1 / record(TODO mp4mux) 拉。
+ *     新增副线必须从四锚点中选一，禁止再起其他 tee。
  *
- *   整体结构：
+ *   整体结构（视频主链，音频与之并行）：
  *
  *      v4l2src
  *         │ (上游 caps 由 V4L2Prober + CapsRanker 决定，jpeg 或 raw 二选一)
@@ -112,7 +116,7 @@ std::string PipelineBuilder::make_input_caps(const v4l2_prober::Capability& cap,
  *      videoconvert ! videoscale ! videorate
  *         │ (下游统一 caps：format=cfg.capture.pixfmt + 期望分辨率/帧率)
  *         ▼
- *      videoconvert  ──►  [可选 GL 滤镜段]  ──►  videoconvert
+ *      videoconvert  ─►  [可选 GL 滤镜段]  ─►  videoconvert
  *                                                       │
  *                                                       ▼
  *                                                 tee  name=t  ◄── raw 锚点
@@ -131,30 +135,57 @@ std::string PipelineBuilder::make_input_caps(const v4l2_prober::Capability& cap,
  *                                         │                   │
  *                                         ▼                   ▼
  *                                  rtph26Xpay name=pay0   暂不追加任何元素
- *                                                                  ↑
- *                                                  录像功能暂未实现，未来在这里
- *                                                  重新接 mp4mux+filesink 子 bin
+ *
+ *   音频主链（与视频平行，同一组 ( ... ) 内，cfg.audio.enabled=true 时才开）：
+ *      alsasrc
+ *         │ (caps: rate / channels)
+ *         ▼
+ *      audioconvert ! audioresample
+ *         │
+ *         ▼
+ *      volume name=aud_vol
+ *         │ (PLAYING 可热调)
+ *         ▼
+ *      valve name=aud_valve   (drop=mute, PLAYING 可热调)
+ *         │
+ *         ▼
+ *      tee name=at  ◄── 原始 PCM 锚点
+ *         │ at. ! queue ! audioconvert ! aac/opus 编码 ! aacparse?
+ *         ▼
+ *      tee name=enc_at  ◄── 音频码流锚点
+ *         │ enc_at. ! queue ! rtpmp4apay/rtpopuspay name=pay1
+ *         ▼
+ *      RTSP pay1（另一路与 pay0 同机 SDP）
  *
  *   副线清单：
  *     ┌────────────┬──────────┬──────────────┬────────┬────────────────────────┐
- *     │ 副线        │ 锈点     │ 落点          │ 状态   │ queue 策略              │
+ *     │ 副线        │ 锚点     │ 落点          │ 状态   │ queue 策略              │
  *     ├────────────┼──────────┼──────────────┼────────┼────────────────────────┤
  *     │ main(rtp)  │ enc_t.   │ rtph26Xpay   │ 已实现  │ leaky=downstream(2)     │
  *     │ snapshot   │ t.       │ jpegenc/file │ 已实现  │ leaky=downstream(2)     │
- *     │ record     │ enc_t.   │ mp4mux+file  │ TODO    │ 原计划 no-leaky 大缓冲     │
- *     │ detect     │ t.       │ appsink      │ 规划中  │ leaky=downstream(2)     │
- *     │ motion     │ t.       │ msg/event    │ 规划中  │ leaky=downstream(2)     │
+ *     │ audio(rtp) │ enc_at.  │ rtpmp4apay/  │ 已实现  │ leaky=no(200ms)         │
+ *     │            │          │ rtpopuspay   │         │                          │
+ *     │ record    │ enc_t.+  │ mp4mux+file  │ TODO    │ 原计划 no-leaky 大缓冲     │
+ *     │           │ enc_at.  │             │         │                          │
+ *     │ detect    │ t.       │ appsink     │ 规划中 │ leaky=downstream(2)     │
+ *     │ motion    │ t.       │ msg/event   │ 规划中 │ leaky=downstream(2)     │
  *     └────────────┴──────────┴──────────────┴────────┴────────────────────────┘
  *
  *   分流原则（添加新副线时遵循）：
- *     1) 二选一锚点：要像素去 t.，要码流去 enc_t.；不再起新 tee。
+ *     1) 四锚点二选一：要像素去 t.，要码流去 enc_t.，要原始音频去 at.，要音频码流去 enc_at.；不再起新 tee。
  *     2) 副线开头必须有 queue：snapshot/detect 类用 leaky=downstream（可丢），
- *        record 类用 no-leaky 大缓冲（落盘不能丢帧）。
- *     3) 副线首端放一个 `valve drop=true` 默认关闭，按需打开。
- *     4) 副线内的元素命名遵循 `<branch>_<role>`（snap_valve / rec_tail / det_appsink）。
- *     5) build() 内部按副线拆分成 append_branch_<x>() 函数。
+ *        record 类用 no-leaky 大缓冲（落盘不能丢帧）；音频主链 queue 用 200ms time-based。
+ *     3) 副线首端放一个 `valve drop=true` 默认关闭，按需打开；
+ *        主线音频上的 `aud_valve` 例外：默认 drop=false，作静音开关用。
+ *     4) 副线内的元素命名遵循 `<branch>_<role>`（snap_valve / rec_tail / det_appsink）；
+ *        音频主链统一 `aud_*` 前缀（aud_vol / aud_valve）。
+ *     5) build() 内部按副线拆分成 append_branch_<x>() 函数。音频拆为
+ *        build_audio_source_segment / append_audio_main_encode_segment /
+ *        append_branch_audio_main_rtp 三个子函数。
+ *     6) A/V 同步约束：音频路径不放 videorate 类重打 PTS 的元素；
+ *        v4l2src 与 alsasrc 都开 do-timestamp=true，共用 pipeline clock。
  *
- * ──────────────────────────────────────────────────────────────────── */
+ * ────────────────────────────────────────────────────────────────── */
 
 /* 主线编码段（公共上游 → tee name=enc_t）：把编码 + parse 提到 tee 之前，
  * 这样 record 副线可以零成本复用同一份 H.264/H.265 ES。
@@ -197,6 +228,63 @@ static void append_branch_snapshot(std::ostringstream& os) {
 static void append_branch_record(std::ostringstream& /*os*/) {
     // 暂不在 launch 中追加任何录像副线元素；主线 RTSP 推流不受影响。
     // 保留函数名与调用点作为未来恢复的坐标。
+}
+
+// ============================================================================
+// 音频主链（alsasrc → caps → audioconvert/resample → volume → valve →
+//   tee at → encoder → aacparse? → tee enc_at → rtp pay1）
+// ============================================================================
+
+std::string PipelineBuilder::audio_encoder_str(const AudioEncoderConfig& e) {
+    std::ostringstream os;
+    if (e.backend == AudioEncoderBackend::AAC) {
+        /* voaacenc / avenc_aac 都以 bps 为单位。 */
+        const char* factory = (e.aac_impl == AudioAacImpl::VoAac) ? "voaacenc" : "avenc_aac";
+        os << factory << " bitrate=" << (e.bitrate_kbps * 1000);
+    } else { // Opus
+        os << "opusenc bitrate=" << (e.bitrate_kbps * 1000);
+    }
+    return os.str();
+}
+
+std::string PipelineBuilder::build_audio_source_segment(const AudioConfig& a) {
+    /* 仅 alsa 实现；pulse 由上层 from_str 中拦下 fallback 到 alsa。
+     * device 为空串时不写 device= ，让 alsasrc 选系统默认。 */
+    std::ostringstream os;
+    os << "alsasrc";
+    if (a.capture.do_timestamp) os << " do-timestamp=true";
+    if (!a.capture.device.empty()) os << " device=" << a.capture.device;
+    /* buffer-time / latency-time：微调起始拖带与周期，避免首 1~2 秒花屏/静默。
+     * 200ms 总缓冲 / 20ms 周期是 USB mic 上验证过的保守值。 */
+    os << " buffer-time=200000 latency-time=20000";
+    os << " ! audio/x-raw,rate=" << a.capture.samplerate
+       << ",channels="           << a.capture.channels;
+    os << " ! audioconvert ! audioresample";
+    return os.str();
+}
+
+/* 音频主线编码段（at. → encoder → aacparse?(opus 跳过) → tee enc_at）。
+ * queue 用 200ms time-based + leaky=no：音频帧丢包会导致 AAC 帧不完整，客户端静默。
+ * pay1 是 gst-rtsp-server 第二路媒体的约定名（与 pay0 对称）。 */
+static void append_audio_main_encode_segment(std::ostringstream& os,
+                                             const AudioEncoderConfig& e) {
+    os << " at. ! queue max-size-time=200000000 max-size-buffers=0 max-size-bytes=0 leaky=no"
+       << " ! audioconvert"
+       << " ! " << PipelineBuilder::audio_encoder_str(e);
+    if (e.backend == AudioEncoderBackend::AAC) {
+        os << " ! aacparse";
+    }
+    os << " ! tee name=enc_at";
+}
+
+/* 音频 RTP 出口副线：enc_at. ! queue ! rtpmp4apay/rtpopuspay name=pay1 pt=97。 */
+static void append_branch_audio_main_rtp(std::ostringstream& os,
+                                         AudioEncoderBackend backend) {
+    const char* payer = (backend == AudioEncoderBackend::AAC)
+                            ? "rtpmp4apay"
+                            : "rtpopuspay";
+    os << " enc_at. ! queue max-size-time=200000000 max-size-buffers=0 max-size-bytes=0 leaky=no"
+       << " ! " << payer << " name=pay1 pt=97 mtu=1400";
 }
 
 // ============================================================================
@@ -339,6 +427,46 @@ std::string PipelineBuilder::build(const Config& c) {
 
     /* 4) record（TODO）：录像副线暂未实现，调用保留作为未来恢复的锈点。 */
     append_branch_record(os);
+
+#if VM_IOT_ENABLE_AUDIO
+    /* ──── 音频主链（可选）────
+     * 与视频主链在同一组 ( ... ) 内并行；cfg.audio.enabled=false 时本段不输出
+     * 任何字符，与改造前的 launch 字符串 bit-for-bit 一致。
+     * 拓扑：
+     *   alsasrc ! caps ! audioconvert ! audioresample
+     *           ! volume name=aud_vol ! valve name=aud_valve
+     *           ! tee name=at
+     *      at.     ! queue ! audioconvert ! encoder ! [aacparse] ! tee name=enc_at
+     *      enc_at. ! queue ! rtpmp4apay/rtpopuspay name=pay1 */
+    if (c.audio.enabled) {
+        /* voaacenc 工厂探测：UTM aarch64 默认镜像有它，但有些精简镜像缺；
+         * 缺了就 fallback 到 avenc_aac（gstreamer1.0-libav 提供）。
+         * 探测必须放在 build() 里：单测里 VM_IOT_ENABLE_AUDIO=1 但不调 build()，
+         * audio_encoder_str 仍是纯函数。 */
+        AudioEncoderConfig eff_enc = c.audio.encoder;
+        if (eff_enc.backend == AudioEncoderBackend::AAC &&
+            eff_enc.aac_impl == AudioAacImpl::VoAac) {
+            GstElementFactory* f = gst_element_factory_find("voaacenc");
+            if (!f) {
+                LOGW("audio: voaacenc factory not found, falling back to avenc_aac. "
+                     "install gstreamer1.0-plugins-bad to enable voaacenc.");
+                eff_enc.aac_impl = AudioAacImpl::AvEnc;
+            } else {
+                gst_object_unref(f);
+            }
+        }
+
+        os << " " << build_audio_source_segment(c.audio);
+        /* aud_vol：PLAYING 可热调，启动期从配置拍快照。
+         * aud_valve：主线静音开关，与副线 valve(default drop=true) 语义不同。 */
+        os << " ! volume name=aud_vol volume=" << c.audio.control.volume;
+        os << " ! valve name=aud_valve drop=" << (c.audio.control.mute ? "true" : "false");
+        os << " ! tee name=at";
+
+        append_audio_main_encode_segment(os, eff_enc);
+        append_branch_audio_main_rtp(os, eff_enc.backend);
+    }
+#endif
 
     os << " )";
     return os.str();

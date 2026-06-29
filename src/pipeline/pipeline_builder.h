@@ -60,6 +60,22 @@ public:
      */
     static std::string fps_to_fraction(double fps);
 
+    /**
+     * 音频编码子串（仅拼 element + 必要属性，不拼上下游 ! 连接符）。
+     *   AAC + voaacenc       → "voaacenc bitrate=96000"
+     *   AAC + avenc_aac      → "avenc_aac bitrate=96000"
+     *   Opus                  → "opusenc bitrate=64000"
+     * voaacenc 缺失时调用方负责 fallback（build() 里完成）。 */
+    static std::string audio_encoder_str(const AudioEncoderConfig& e);
+
+    /**
+     * 音频源段（v4l2src 的样子）：
+     *   alsasrc do-timestamp=true device=hw:0,0
+     *     ! audio/x-raw,rate=48000,channels=2
+     *     ! audioconvert ! audioresample
+     * 返回串以 "... ! " 结尾，供外层续接 volume / valve / tee。 */
+    static std::string build_audio_source_segment(const AudioConfig& a);
+
 private:
     /* 按 backend 返回编码器子串与所需输入像素格式 */
     static std::string encoder_str(const EncoderConfig &e, std::string &src_fmt);

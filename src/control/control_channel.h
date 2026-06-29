@@ -62,6 +62,9 @@
 //     reload                       重新读取 shader 文件并重新注入
 //     status                       打印运行状态（uptime / 客户端数 / 编码 / 滤镜 / 录像等）
 //     snapshot [PATH]              抓一张 jpeg 落盘
+//     audio status                 打印音频副线运行状态
+//     audio mute on/off            主线 valve.drop 静音开关
+//     audio volume <v>             主线 volume.volume 调音量，[0,10]
 //   非法命令记 warning，不会让进程崩溃。
 //
 // ─────────────────────────── 回执协议 ───────────────────────────
@@ -91,6 +94,7 @@ class ShaderFilter;
 class RtspServer;
 class Snapshot;
 class PagBranch;
+class AudioBranch;
 struct Config;
 
 class ControlChannel {
@@ -110,6 +114,7 @@ public:
                const RtspServer*  server,
                Snapshot*          snapshot,
                PagBranch*         pag_branch,
+               AudioBranch*       audio_branch,
                // TODO(record): 重开录像时在此恢复 Record* record 参数
                std::chrono::steady_clock::time_point start_time);
     void stop();
@@ -141,6 +146,13 @@ private:
      * effect 专属子命令 set-replace-image* 需 dynamic_cast<PagEffect*>。 */
     std::string handle_pag(const std::vector<std::string>& toks);
 
+    /* 音频命令族：
+     *   audio status                  输出 AudioBranch::format_status
+     *   audio mute on/off             aud_valve.drop
+     *   audio volume <v>              aud_vol.volume
+     * audio_branch_ 为 nullptr 时返 "audio_disabled"。 */
+    std::string handle_audio(const std::vector<std::string>& toks);
+
     /* 工具：构造 "ok <line>\n<body>.\n" / "err <line> <reason>\n.\n"。 */
     static std::string make_ok(const std::string& cmd_line, const std::string& body);
     static std::string make_err(const std::string& cmd_line, const std::string& reason);
@@ -152,6 +164,7 @@ private:
     const RtspServer* server_ = nullptr;
     Snapshot*     snapshot_ = nullptr;
     PagBranch*    pag_branch_ = nullptr;
+    AudioBranch*  audio_branch_ = nullptr;
     std::chrono::steady_clock::time_point start_time_{};
 
     GIOChannel*   channel_ = nullptr;

@@ -10,6 +10,7 @@
 #include "snapshot.h"
 #include "pag_branch.h"
 #include "pag_effect.h"
+#include "audio_branch.h"
 #include "config.h"
 #include "log.h"
 #include <filesystem>
@@ -50,6 +51,7 @@ bool ControlChannel::start(const std::string& req_path,
                            const RtspServer* server,
                            Snapshot* snapshot,
                            PagBranch* pag_branch,
+                           AudioBranch* audio_branch,
                            std::chrono::steady_clock::time_point start_time)
 {
     filter_ = filter;
@@ -57,6 +59,7 @@ bool ControlChannel::start(const std::string& req_path,
     server_ = server;
     snapshot_ = snapshot;
     pag_branch_ = pag_branch;
+    audio_branch_ = audio_branch;
     start_time_ = start_time;
 
     /* 1) 请求 FIFO（必须有 filter，否则 ShaderFilter 命令无意义；但不强求 server/cfg）。 */
@@ -201,6 +204,7 @@ void ControlChannel::stop()
     server_ = nullptr;
     snapshot_ = nullptr;
     pag_branch_ = nullptr;
+    audio_branch_ = nullptr;
 }
 
 gboolean ControlChannel::on_readable(GIOChannel* src, GIOCondition cond, gpointer user)
@@ -308,6 +312,10 @@ void ControlChannel::handle_line(const std::string& line)
     else if (cmd == "pag")
     {
         reply = handle_pag(toks);
+    }
+    else if (cmd == "audio")
+    {
+        reply = handle_audio(toks);
     }
     else
     {
@@ -478,6 +486,15 @@ std::string ControlChannel::handle_status() const
         os << body;
     } else {
         os << "pag_enabled=false\n";
+    }
+
+    /* 7) 音频副线：仅在 audio.enabled=true 时输出详细块，避免老脚本被多余字段干扰。 */
+    if (audio_branch_) {
+        std::string body;
+        audio_branch_->format_status(body);
+        os << body;
+    } else {
+        os << "audio_enabled=false\n";
     }
 
     LOGI("control: status (uptime={}s, clients={})",
@@ -662,6 +679,62 @@ std::string ControlChannel::handle_pag(const std::vector<std::string>& toks)
         std::string err;
         bool ok = eff->set_replace_image_every(every, err);
         return ok ? make_ok(line, "every=" + std::to_string(every))
+                  : make_err(line, err.empty() ? "apply_failed" : err);
+    }
+
+    return make_err(line, "unknown_subcommand");
+}
+
+/* ─────────────────── 音频命令族 ────────────────────
+ * 协议：
+ *   audio status                       打印 AudioBranch::format_status 全量
+ *   audio mute on / audio mute off     设置 aud_valve.drop
+ *   audio volume <v>                   设置 aud_vol.volume，[0,10]
+ * audio_branch_ 为 nullptr（cfg.audio.enabled=false）时一律返回 audio_disabled。 */
+std::string ControlChannel::handle_audio(const std::vector<std::string>& toks)
+{
+    std::string line;
+    for (size_t i = 0; i < toks.size(); ++i) {
+        if (i) line += ' ';
+        line += toks[i];
+    }
+
+    if (!audio_branch_) {
+        return make_err(line, "audio_disabled");
+    }
+    if (toks.size() < 2) {
+        return make_err(line, "missing_subcommand");
+    }
+
+    const std::string& sub = toks[1];
+
+    if (sub == "status") {
+        std::string body;
+        audio_branch_->format_status(body);
+        return make_ok(line, body);
+    }
+
+    if (sub == "mute") {
+        if (toks.size() != 3) return make_err(line, "usage_audio_mute");
+        const std::string& v = toks[2];
+        bool m;
+        if      (v == "on"  || v == "true"  || v == "1") m = true;
+        else if (v == "off" || v == "false" || v == "0") m = false;
+        else return make_err(line, "invalid_value");
+        std::string err;
+        bool ok = audio_branch_->set_mute(m, err);
+        return ok ? make_ok(line, std::string("mute=") + (m ? "true" : "false"))
+                  : make_err(line, err.empty() ? "apply_failed" : err);
+    }
+
+    if (sub == "volume") {
+        if (toks.size() != 3) return make_err(line, "usage_audio_volume");
+        float v;
+        try { v = std::stof(toks[2]); }
+        catch (...) { return make_err(line, "invalid_value"); }
+        std::string err;
+        bool ok = audio_branch_->set_volume(v, err);
+        return ok ? make_ok(line, "volume=" + toks[2])
                   : make_err(line, err.empty() ? "apply_failed" : err);
     }
 

@@ -38,6 +38,22 @@
                                                                               ┊
                                                                               ▼
                                                                         mp4mux ─► filesink           # 每段一个独立子 bin
+
+[audio source] (cfg.audio.enabled=true 时启用，与视频通道并行)
+  alsasrc  ─►  audio/x-raw, rate=48000, channels=2
+            └─► audioconvert ─► audioresample
+                └─► volume(name=aud_vol)
+                    └─► valve(name=aud_valve, drop=mute)
+                        └─► tee  name=at        # 原始 PCM 锚点
+                                  ├──► (规划：ASR / level / VU)
+                                  └──► (主线音频编码段)
+                                       queue(time=200ms) ─► audioconvert ─► voaacenc/avenc_aac/opusenc ─► [aacparse]
+                                         └─► tee  name=enc_at   # 音频码流锚点
+                                              ├──► [branch:audio_main]
+                                              │     queue ─► rtpmp4apay/rtpopuspay (pay1)
+                                              │
+                                              └──► [branch:record-audio] (TODO)
+                                                    queue(no-leaky) ─► mp4mux.audio_0
 ```
 
 ## 分类目录
@@ -49,11 +65,15 @@
 - [jpegparse](./jpegparse.md) —— MJPEG 流帧边界对齐与容错
 - [jpegdec](./jpegdec.md) —— JPEG → 原始像素解码
 - [h264parse](./h264parse.md) —— H.264 NAL 重组、SPS/PPS 注入
+- [aacparse](./aacparse.md) —— AAC 帧边界对齐与 codec_data 注入
 
 ### 3. Filter / Converter（CPU 通用变换）
 - [videoconvert](./videoconvert.md) —— 像素格式互转
 - [videoscale](./videoscale.md) —— 分辨率缩放
 - [videorate](./videorate.md) —— 帧率重采样（丢帧 / 重复帧）
+- [audioconvert](./audioconvert.md) —— PCM 格式 / 通道布局互转
+- [audioresample](./audioresample.md) —— PCM 采样率重采样
+- [volume](./volume.md) —— PCM 实时音量调整（PLAYING 可热调）
 
 ### 4. OpenGL（GPU 滤镜段）
 - [glupload](./glupload.md) —— 系统内存 → GL 纹理上传
@@ -71,9 +91,17 @@
 ### 6. Encoder（编码器）
 - [x264enc](./x264enc.md) —— H.264 软编（libx264）
 - [jpegenc](./jpegenc.md) —— 单帧 JPEG 软编
+- [voaacenc](./voaacenc.md) —— AAC 软编（VisualOn，主选）
+- [avenc_aac](./avenc_aac.md) —— AAC 软编（FFmpeg，fallback）
+- [opusenc](./opusenc.md) —— Opus 软编（低码率高质量）
 
-### 7. Payloader / Muxer / Sink（封装与落盘）
+### 7. Audio Source（音频源）
+- [alsasrc](./alsasrc.md) —— Linux ALSA 麦克风采集源
+
+### 8. Payloader / Muxer / Sink（封装与落盘）
 - [rtph264pay](./rtph264pay.md) —— H.264 → RTP 打包（RFC 6184）
+- [rtpmp4apay](./rtpmp4apay.md) —— AAC → RTP 打包（RFC 3640，mpeg4-generic）
+- [rtpopuspay](./rtpopuspay.md) —— Opus → RTP 打包（RFC 7587）
 - [multifilesink](./multifilesink.md) —— 多文件序列输出
 - [mp4mux](./mp4mux.md) —— ISO BMFF / mp4 容器封装（项目录像副线核心，每段一个独立实例）
 - [filesink](./filesink.md) —— 单文件落盘（与 mp4mux 配对每段一个）

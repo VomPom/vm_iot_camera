@@ -115,6 +115,61 @@ struct ControlConfig {
     std::string reply_fifo;    // 应答 FIFO 路径，空串=不写回执
 };
 
+/* ──────────────────── 音频通道配置 ──────────────────── *
+ * 音频通道与视频通道并行（双锚点对偶）：
+ *   - 视频：tee name=t / tee name=enc_t（已有）
+ *   - 音频：tee name=at / tee name=enc_at（本次新增）
+ *
+ * 设计纪律：
+ *   1) 顶层开关 enabled 默认 false；旧 yaml/部署 100% 行为不变。
+ *   2) 编码 backend 影响 RTP payloader 选型：aac→rtpmp4apay / opus→rtpopuspay。
+ *   3) volume / mute 走主链 volume + valve 元素，PLAYING 状态下可热调；
+ *      启动期值在 AudioBranch::on_attached_locked 时一次性注入。
+ *   4) 仅 alsa 后端实现；pulse 占坑（解析时 fallback alsa + warn）。
+ *      与 PagType / 编码 backend 一样使用枚举 + to_string/from_str 互转。
+ */
+enum class AudioCaptureBackend { Alsa, Pulse };
+enum class AudioEncoderBackend { AAC, Opus };
+enum class AudioAacImpl        { VoAac, AvEnc };
+
+const char* to_string(AudioCaptureBackend b);
+const char* to_string(AudioEncoderBackend b);
+const char* to_string(AudioAacImpl       i);
+AudioCaptureBackend audio_capture_backend_from_str(const std::string& s, AudioCaptureBackend fb);
+AudioEncoderBackend audio_encoder_backend_from_str(const std::string& s, AudioEncoderBackend fb);
+AudioAacImpl        audio_aac_impl_from_str       (const std::string& s, AudioAacImpl        fb);
+
+struct AudioCaptureConfig {
+    AudioCaptureBackend backend      = AudioCaptureBackend::Alsa;
+    /* alsasrc device 字符串。空串=系统默认（让 alsasrc 自己挑）。
+     * 形如 "hw:0,0" / "plughw:CARD=USB,DEV=0"。 */
+    std::string         device       = "hw:0,0";
+    int                 samplerate   = 48000;
+    int                 channels     = 2;
+    bool                do_timestamp = true;
+};
+
+struct AudioEncoderConfig {
+    AudioEncoderBackend backend      = AudioEncoderBackend::AAC;
+    /* 仅 backend=AAC 生效；voaacenc 缺失时 PipelineBuilder 自动 fallback avenc_aac。 */
+    AudioAacImpl        aac_impl     = AudioAacImpl::VoAac;
+    int                 bitrate_kbps = 96;
+};
+
+struct AudioControlConfig {
+    /* volume：[0.0, 10.0]；超过 1.0 是放大（可能溢出，由用户负责）。 */
+    float volume = 1.0f;
+    /* mute=true 时启动期把主链 valve.drop=true，没有任何 RTP 包会出去。 */
+    bool  mute   = false;
+};
+
+struct AudioConfig {
+    bool                enabled = false;       /* 默认关，旧行为不变 */
+    AudioCaptureConfig  capture;
+    AudioEncoderConfig  encoder;
+    AudioControlConfig  control;
+};
+
 /* 截图副线（snapshot branch）配置。 */
 struct SnapshotConfig {
     std::string dir        = "/tmp/vm_iot/snapshots"; // 默认输出目录；take 命令未传 path 时使用
@@ -132,6 +187,7 @@ struct Config {
     FilterConfig   filter;
     ControlConfig  control;
     SnapshotConfig snapshot;
+    AudioConfig    audio;
     // TODO(record): 重开录像时恢复  RecordConfig record;
 
     std::string config_dir;
