@@ -1,0 +1,19 @@
+{
+  "name": "vm-iot-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Web console for vm_iot daemon (RTSP preview + control panel)",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev":   "node --watch server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "fastify": "^4.28.1",
+    "@fastify/static": "^7.0.4",
+    "@fastify/websocket": "^10.0.1"
+  }
+}

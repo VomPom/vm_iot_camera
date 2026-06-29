@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>vm_iot console</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <span class="brand">vm_iot <em>console</em></span>
+  <span id="liveDot" class="dot dot-idle"></span>
+  <span id="liveText" class="muted">offline</span>
+  <span class="sep"></span>
+  <span class="kv"><label>uptime</label><span id="hUptime">--</span></span>
+  <span class="kv"><label>encoder</label><span id="hEncoder">--</span></span>
+  <span class="kv"><label>clients</label><span id="hClients">--</span></span>
+  <span class="kv"><label>filter</label><span id="hFilter">--</span></span>
+  <span class="grow"></span>
+  <span class="muted">vm_iot.ctl <span id="hCtl">/tmp/vm_iot.ctl</span></span>
+</header>
+
+<main class="grid">
+
+  <!-- ────────── 视频区 ────────── -->
+  <section class="panel video-panel">
+    <div class="panel-head">
+      <h2>live preview</h2>
+      <div class="seg" id="modeSeg">
+        <button data-mode="webrtc" class="on">WebRTC</button>
+        <button data-mode="hls">HLS</button>
+        <button data-mode="rtsp">RTSP url</button>
+      </div>
+    </div>
+    <div class="video-stage">
+      <video id="player" autoplay playsinline muted></video>
+      <div id="rtspBox" class="rtsp-box hidden">
+        <p class="muted">your browser cannot play RTSP directly. use:</p>
+        <code id="rtspUrl">rtsp://&lt;host&gt;:8554/live</code>
+        <p class="muted small">e.g. <span class="mono">ffplay -stats &lt;url&gt;</span> or VLC → Open Network Stream</p>
+      </div>
+      <div id="videoOverlay" class="video-overlay">
+        <div class="overlay-msg" id="overlayMsg">connecting…</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ────────── 状态卡 ────────── -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>status</h2>
+      <button id="btnStatusRefresh" class="ghost">refresh</button>
+    </div>
+    <table class="kv-table" id="statusTable">
+      <tbody>
+        <tr><td>uptime</td><td id="sUptime">--</td></tr>
+        <tr><td>clients</td><td id="sClients">--</td></tr>
+        <tr><td>bitrate</td><td id="sBitrate">--</td></tr>
+        <tr><td>encoder</td><td id="sEncoder">--</td></tr>
+        <tr><td>filter_type</td><td id="sFilter">--</td></tr>
+        <tr><td>pag_file</td><td id="sPag">--</td></tr>
+        <tr><td>device</td><td id="sDevice">--</td></tr>
+        <tr><td>resolution</td><td id="sRes">--</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ────────── filter ────────── -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>filter</h2>
+      <span class="muted small">shader.frag</span>
+    </div>
+    <div class="row">
+      <button class="ghost" data-cmd="filter-prev">◀ prev</button>
+      <div class="seg" id="filterSeg">
+        <!-- buttons injected by JS based on max_type -->
+      </div>
+      <button class="ghost" data-cmd="filter-next">next ▶</button>
+    </div>
+    <div class="row">
+      <button class="ghost" data-cmd="filter-reload">reload shader</button>
+      <span class="muted small">hot-swap effects.frag from disk</span>
+    </div>
+  </section>
+
+  <!-- ────────── snapshot / record ────────── -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>capture</h2>
+    </div>
+    <div class="row split">
+      <div class="col">
+        <div class="row"><button class="primary" data-cmd="snapshot">📸 snapshot</button></div>
+        <div class="muted small" id="snapResult">no captures yet</div>
+      </div>
+      <div class="col">
+        <div class="row gap">
+          <button class="ghost" data-cmd="record-start">● rec</button>
+          <button class="ghost" data-cmd="record-stop">■ stop</button>
+          <span id="recState" class="badge">idle</span>
+        </div>
+        <div class="row gap">
+          <label class="muted small">auto</label>
+          <input id="recAuto" type="number" min="1" max="3600" value="30" />
+          <button class="ghost" data-cmd="record-auto">apply</button>
+          <span class="muted small">sec</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ────────── PAG overlay ────────── -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>pag overlay</h2>
+      <button id="btnPagRefresh" class="ghost">refresh</button>
+    </div>
+    <div class="row gap">
+      <label>file</label>
+      <input id="pagFile" type="text" placeholder="/abs/path/to.pag" />
+      <button class="ghost" data-cmd="pag-set-file">set</button>
+    </div>
+    <div class="row gap">
+      <label>text idx</label>
+      <input id="pagTextIdx" type="number" value="0" min="0" max="31" />
+      <input id="pagText" type="text" placeholder="utf-8 string" />
+      <button class="ghost" data-cmd="pag-set-text">set</button>
+    </div>
+    <div class="row gap">
+      <label>replace-image idx</label>
+      <input id="pagReplaceIdx" type="number" value="-1" min="-1" max="31" />
+      <button class="ghost" data-cmd="pag-set-replace">apply</button>
+      <span class="muted small">-1 = off</span>
+    </div>
+    <div class="row gap">
+      <label>throttle every</label>
+      <input id="pagThrottle" type="number" value="2" min="1" max="60" />
+      <button class="ghost" data-cmd="pag-set-throttle">apply</button>
+      <span class="muted small">frames</span>
+    </div>
+  </section>
+
+  <!-- ────────── raw 命令行 ────────── -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>raw</h2>
+      <span class="muted small">advanced — sends one line to FIFO</span>
+    </div>
+    <div class="row gap">
+      <span class="prompt">&gt;</span>
+      <input id="rawInput" type="text" placeholder="filter set 2" autocomplete="off" />
+      <button class="ghost" data-cmd="raw-send">send ⏎</button>
+    </div>
+  </section>
+
+  <!-- ────────── 事件流 ────────── -->
+  <section class="panel log-panel">
+    <div class="panel-head">
+      <h2>events</h2>
+      <button id="btnLogClear" class="ghost">clear</button>
+    </div>
+    <pre id="log" class="log"></pre>
+  </section>
+
+</main>
+
+<footer class="bottom muted small">
+  vm_iot web console · keys: <kbd>1-9</kbd> filter type · <kbd>Space</kbd> snapshot · <kbd>R</kbd> record toggle · <kbd>/</kbd> raw
+</footer>
+
+<script src="/app.js" type="module"></script>
+</body>
+</html>

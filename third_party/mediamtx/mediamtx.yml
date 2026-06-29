@@ -1,0 +1,52 @@
+# mediamtx.yml — vm_iot web console 专用最小配置
+# ---------------------------------------------------------------------------
+# 角色：把 daemon 已经在跑的 RTSP 流（rtsp://127.0.0.1:8554/live）转换成
+#       浏览器原生支持的 WebRTC（WHEP）和 HLS，本身不录制不存盘。
+# 启动：./mediamtx mediamtx.yml
+# 端口：
+#   8554 → daemon 自己（mediamtx **不**复用，由我们在下面禁用 RTSP 服务）
+#   8889 → WebRTC / WHEP（浏览器主用）
+#   8888 → HLS（兜底，1~3s 延迟）
+#   9997 → API（开发期可留，生产请关）
+# ---------------------------------------------------------------------------
+
+# 全局
+logLevel: info
+logDestinations: [stdout]
+readTimeout: 10s
+writeTimeout: 10s
+
+# 关闭 mediamtx 自带的 RTSP / RTMP / SRT，避免和 daemon 抢 8554
+rtsp: no
+rtmp: no
+srt: no
+
+# WebRTC（WHEP）
+webrtc: yes
+webrtcAddress: :8889
+webrtcEncryption: no
+# 局域网内不需要 STUN，留空让浏览器直连 host
+webrtcICEServers2: []
+
+# HLS（兜底播放路径）
+hls: yes
+hlsAddress: :8888
+hlsAlwaysRemux: no
+hlsVariant: lowLatency
+hlsSegmentCount: 5
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+
+# 控制 API（开发期可启，生产建议关掉或绑 127.0.0.1）
+api: yes
+apiAddress: 127.0.0.1:9997
+
+# Path 定义：单一 path 名为 "live"
+# mediamtx 启动时会主动按 source 拉流，daemon 不在时仅记录错误但不退出。
+paths:
+  live:
+    source: rtsp://127.0.0.1:8554/live
+    sourceProtocol: tcp           # daemon 端默认 TCP；走 TCP 更稳
+    sourceOnDemand: no            # 常驻拉流；首个浏览器接入零等待
+    sourceOnDemandStartTimeout: 5s
+    sourceOnDemandCloseAfter: 10s
