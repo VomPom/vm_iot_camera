@@ -1,5 +1,7 @@
 # vm_iot
 
+**English** · [简体中文](README.zh.md)
+
 A small RTSP camera daemon. It reads frames from a V4L2 device, runs an
 optional GLSL post-process filter, encodes the result with a software
 H.264 / H.265 backend, and serves the stream through `gst-rtsp-server`.
@@ -9,6 +11,53 @@ config-driven binary instead of a hand-maintained `gst-launch` shell
 script. A second binary, `vm_iot_ctl`, talks to the running daemon over
 a pair of FIFOs to switch effects, take snapshots, or query status
 without restarting the stream.
+
+The project is developed and validated on a **Raspberry Pi 5 (8 GB)**
+running **Ubuntu 24.04**, with a USB UVC webcam plugged into the front
+USB port. The daemon, the control FIFO, and the web console all run on
+this single box.
+
+<p align="center">
+  <img src=".imgs/device.jpg" alt="vm_iot reference hardware: Raspberry Pi 5 8GB + USB webcam, Ubuntu 24.04" width="35%"/>
+</p>
+
+---
+
+## Demo
+
+A companion web console (served separately) drives `vm_iot_ctl` and
+embeds the live RTSP stream so you can switch shaders, toggle the PAG
+sticker, take snapshots, and inspect status from a browser — including
+on a phone over LAN.
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <b>Web console — desktop</b><br/>
+      <img src=".imgs/all.jpg" alt="Web console overview on desktop" width="100%"/>
+    </td>
+    <td align="center" width="50%">
+      <b>Web console — mobile</b><br/>
+      <img src=".imgs/mobile.png" alt="Web console on a mobile device" width="60%"/>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <b>Live stream playback</b><br/>
+      <a href=".imgs/video1.mp4" title="Click to play video1.mp4">
+        <img src=".imgs/video1.gif" alt="Live RTSP stream preview (click for MP4)" width="100%"/>
+      </a><br/>
+      <sub>Click the GIF to open the full-quality MP4.</sub>
+    </td>
+    <td align="center" width="50%">
+      <b>Console interaction</b><br/>
+      <a href=".imgs/video2.mp4" title="Click to play video2.mp4">
+        <img src=".imgs/video2.gif" alt="Web console interaction recording (click for MP4)" width="100%"/>
+      </a><br/>
+      <sub>Click the GIF to open the full-quality MP4.</sub>
+    </td>
+  </tr>
+</table>
 
 ---
 
@@ -52,13 +101,7 @@ without restarting the stream.
 vm_iot/
 ├── CMakeLists.txt              # Top-level build script
 ├── assets/                     # Runtime resources (single symlink target)
-│   ├── config/
-│   │   └── default.yaml        # Default runtime configuration
-│   ├── pag/                    # .pag assets consumed by pagfilter / selftest
-│   └── shaders/
-│       └── effects.frag        # GL fragment shader; holds all filter variants
 ├── docs/
-│   └── gstreamer/              # Per-element notes for every gst element used
 ├── scripts/
 │   ├── gst_launch/             # Standalone gst-launch helpers (probe / preview / record / rtsp)
 │   └── bench/                  # Encoder benchmarks (e.g. h265_compare.sh)
@@ -70,19 +113,14 @@ vm_iot/
 │   ├── filter/                 # ShaderFilter: hot-switchable glshader wrapper
 │   ├── branches/
 │   │   └── snapshot/           # Snapshot branch (tee + valve + jpegenc)
+│   │   └── pag/                # PAG branch
 │   ├── control/                # ControlChannel: FIFO-based command server
 │   ├── rtsp/                   # gst-rtsp-server wrapper
 │   ├── util/                   # V4L2Prober, CapsRanker
 │   └── cli/
 │       └── iotcamctl.cpp       # vm_iot_ctl source (no business logic, just protocol)
-└── tests/                      # GoogleTest-based unit tests + developer helpers
-    ├── test_config.cpp
-    ├── test_caps_ranker.cpp
-    ├── test_pipeline_builder.cpp
-    ├── test_v4l2_prober.cpp
-    ├── tools/
-    │   └── probe_dev.cpp       # Standalone V4L2 capability dump (probe_dev binary)
-    └── demo/simple_v4l2_grap.c
+└── plugins/
+    └── pagfilter/              # Custom GstElement that renders a .pag onto the I420 main line
 ```
 
 ---
@@ -186,66 +224,83 @@ ffplay rtsp://127.0.0.1:8554/live
 
 ---
 
-## Configuration
+## Pipeline topology
 
-[assets/config/default.yaml](assets/config/default.yaml):
+The daemon assembles a single `gst-launch`-style string at startup and
+hands it to `gst-rtsp-server`. The shape below mirrors what
+`PipelineBuilder::build` in
+[src/pipeline/pipeline_builder.cpp](src/pipeline/pipeline_builder.cpp)
+produces today; one `tee` for raw pixels (`name=t`) and one for the
+encoded elementary stream (`name=enc_t`) are the only two anchors any
+side branch is allowed to attach to.
 
-```yaml
-server:
-  port: 8554
-  mount: /live
-capture:
-  device: /dev/video0
-  # The width/height/framerate below are *requested* values. At startup,
-  # V4L2Prober enumerates what the camera actually supports and
-  # CapsRanker picks the closest (fmt, w, h, fps) combination.
-  width: 1280
-  height: 720
-  framerate: 30
-  pixfmt: I420            # I420 | YUY2 | NV12 ... — the format fed to the encoder
-  prefer_jpeg: true       # true = prefer MJPG from camera; false = prefer raw
-encoder:
-  backend: x264           # x264 | openh264 | x265
-  bitrate_kbps: 4000
-  gop: 30
-  bframes: 0              # only honored by x264; ignored by openh264 / x265
-filter:
-  enabled: true                   # false = no GL filter stage in the pipeline
-  shader: effects.frag            # path is resolved relative to assets/shaders/
-  filter_type: 0                  # startup variant: 0=passthrough 1=mosaic 2=invert
-  max_type: 2                     # upper bound for `filter next` cycling
-control:
-  request_fifo: /tmp/vm_iot.ctl   # command FIFO;  empty string = disabled
-  reply_fifo:   /tmp/vm_iot.reply # reply FIFO;    empty string = no reply
-snapshot:
-  dir: /tmp/vm_iot/snapshots      # default JPEG output dir if `snapshot` has no PATH
-  quality: 90
-  timeout_ms: 1500                # how long to wait for one frame
-log:
-  level: info             # trace | debug | info | warn | err
+```text
+[source]
+  v4l2src  ─►  image/jpeg, 1280x720@60   (or raw caps; chosen by V4L2Prober + CapsRanker)
+              └─► jpegparse ─► jpegdec     (jpeg path only)
+                  └─► videoconvert ─► videoscale ─► videorate
+                      └─► video/x-raw, I420, 1280x720@30   (downstream caps = cfg.capture.pixfmt)
+                          └─► videoconvert
+                              └─► [optional GL filter] glupload ─► glcolorconvert
+                                  └─► glshader (name=f0)
+                                      └─► glcolorconvert ─► gldownload
+                                          └─► videoconvert
+                                              └─► [optional pagfilter (name=pag0)]
+                                                # inserted when cfg.filter.pag.enabled=true; passthrough if pag-file is empty,
+                                                # otherwise renders the .pag and alpha-blends onto I420.
+                                                # Hot-swappable at PLAYING via cfg.filter.pag.* + iotcamctl pag *.
+                                                  └─► tee  name=t        # raw anchor
+                                                       ├──► [branch:snapshot]
+                                                       │     queue (leaky=downstream, max-buffers=2, silent=true)
+                                                       │       └─► valve(snap_valve, drop=true)
+                                                       │           └─► videoconvert ─► jpegenc
+                                                       │               └─► multifilesink(snap_sink, post-messages=true)
+                                                       │
+                                                       └──► (main encode segment)
+                                                             queue (leaky=downstream, max-buffers=2)
+                                                               └─► videoconvert ─► video/x-raw,format=I420
+                                                                   └─► x264enc / openh264enc / x265enc
+                                                                       └─► h264parse | h265parse (config-interval=1)
+                                                                           └─► tee  name=enc_t   # encoded anchor
+                                                                                ├──► [branch:main]
+                                                                                │     queue (leaky=downstream, max-buffers=2)
+                                                                                │       └─► rtph264pay | rtph265pay
+                                                                                │           name=pay0 pt=96 mtu=1400
+                                                                                │
+                                                                                └──► [branch:record]   ⏳ planned
+                                                                                      # append_branch_record() is currently a no-op,
+                                                                                      # so no recording elements are appended to the launch string.
+                                                                                      # Reserved spot for a future mp4mux + filesink sub-bin.
 ```
 
-### CLI options (daemon)
+Notes that read straight off the diagram:
 
-| Flag                 | Overrides             | Example             |
-|----------------------|-----------------------|---------------------|
-| `-c, --config FILE`  | path to YAML config   | `-c my.yaml`        |
-| `-d, --device PATH`  | `capture.device`      | `-d /dev/video2`    |
-| `-p, --port N`       | `server.port`         | `-p 9000`           |
-| `-b, --bitrate KBPS` | `encoder.bitrate_kbps`| `-b 6000`           |
-| `-l, --log-level L`  | `log.level`           | `-l debug`          |
-| `-h, --help`         | print usage and exit  |                     |
+- **Two anchors only.** Pixel-domain branches attach to `tee name=t`,
+  bitstream branches attach to `tee name=enc_t`. New side branches are
+  not allowed to spawn a third tee.
+- **Each branch starts with a queue.** Lossy branches
+  (snapshot / detect / motion) use `leaky=downstream` so the main line
+  can never be back-pressured by them; lossless branches (record) are
+  expected to use a non-leaky queue with a larger buffer.
+- **`valve drop=true` by default.** The first element of every
+  optional branch is a closed valve; `ControlChannel` opens it on
+  demand. That is how `snapshot` produces exactly one JPEG per command.
+- **Encode once, distribute many.** The encoder sits *before* the
+  bitstream tee, so the future record branch can reuse the same
+  H.264 / H.265 ES that RTP is already paying for.
 
-Override priority: `CLI > YAML > built-in defaults`.
+Full list of branches (planned and live):
 
-### Hot reload
+| branch     | anchor   | sink             | status     | queue policy             |
+|------------|----------|------------------|------------|--------------------------|
+| main(rtp)  | enc_t.   | rtph26Xpay       | live       | leaky=downstream(2)      |
+| snapshot   | t.       | jpegenc + file   | live       | leaky=downstream(2)      |
+| record     | enc_t.   | mp4mux + file    | planned    | non-leaky, large buffer  |
+| detect     | t.       | appsink          | planned    | leaky=downstream(2)      |
+| motion     | t.       | msg / event      | planned    | leaky=downstream(2)      |
 
-The build creates a single symlink from `build/assets` to `assets/`,
-so `build/assets/config`, `build/assets/pag`, and `build/assets/shaders`
-are all live views into the repo. Edit any file under those directories
-and restart the process; the new values are picked up without a
-rebuild. For shader-only edits, you can skip the restart and run
-`vm_iot_ctl reload` instead.
+A per-element reference for everything that appears in the diagram
+lives under [docs/gstreamer/](docs/gstreamer/README.md).
 
 ---
 
@@ -302,54 +357,37 @@ libstdc++.
 ./build/vm_iot_ctl raw "filter set 1"
 ```
 
-### Global options
+### PAG overlay control
 
-| Flag             | Purpose                                                        | Default                        |
-|------------------|----------------------------------------------------------------|--------------------------------|
-| `--ctl PATH`     | Request FIFO (`$IOTCAM_CTL` overrides the default)             | `/tmp/vm_iot.ctl`              |
-| `--reply PATH`   | Reply FIFO (`$IOTCAM_REPLY` overrides the default)             | `/tmp/vm_iot.reply`            |
-| `--timeout MS`   | How long to wait for the daemon's reply                        | `2000`                         |
-| `--json`         | Print the reply as JSON instead of plain text                  | off                            |
-| `-q, --quiet`    | Suppress body output; rely on the exit code                    | off                            |
-| `--no-lock`      | Skip `flock` on the reply FIFO. Use only if you know nothing else is reading it. | off          |
-| `-h, --help`     | Show usage                                                     |                                |
-
-The two FIFO paths must match the daemon's `control.request_fifo` and
-`control.reply_fifo` config entries. If you change those in
-`assets/config/default.yaml`, point `vm_iot_ctl` at them with `--ctl` /
-`--reply` or by exporting `IOTCAM_CTL` / `IOTCAM_REPLY`.
-
-### Exit codes
-
-| Code | Meaning                                                                  |
-|------|--------------------------------------------------------------------------|
-| 0    | Daemon replied `ok`.                                                     |
-| 1    | Daemon replied `err`. Reason is printed to stderr (or `error` in JSON).  |
-| 2    | Bad CLI arguments.                                                       |
-| 10   | A FIFO is missing or unopenable. Likely the daemon is not running.       |
-| 11   | Another `vm_iot_ctl` already holds the reply-FIFO lock. Retry, or pass `--no-lock`. |
-| 124  | Timed out waiting for the reply.                                         |
-
-### Wire protocol (if you want to skip the client)
-
-The daemon listens on a plain text FIFO. One command per line, terminated
-by `\n`. The reply is one `ok <cmd>` or `err <cmd> <reason>` line, then
-zero or more `key=value` body lines, then a single `.` line:
-
-```text
-ok filter set 2
-type=2
-.
-```
+The `pagfilter` element accepts hot updates while the pipeline is in
+`PLAYING`, so you don't need to restart the daemon to swap the asset,
+edit a text layer, or toggle picture-in-picture. The same commands
+drive the *pag overlay* panel of the web console.
 
 ```bash
-# Manual driving without vm_iot_ctl:
-cat /tmp/vm_iot.reply &
-echo "status" > /tmp/vm_iot.ctl
+# Inspect overlay status (attached / pag_file / replace_idx / replace_every)
+./build/vm_iot_ctl pag get
+
+# Hot-swap the .pag asset (absolute path; the daemon reloads in place)
+./build/vm_iot_ctl pag set-file /abs/path/to/sticker.pag
+
+# Replace text layer #IDX with a UTF-8 string
+./build/vm_iot_ctl pag set-text 0 "Hello, world"
+
+# Picture-in-picture: route the live video frame into PAG layer #IDX.
+# Pass -1 to turn it off.
+./build/vm_iot_ctl pag set-replace-image 0
+./build/vm_iot_ctl pag set-replace-image -1
+
+# Throttle the picture-in-picture upload: push 1 frame every N (>=1).
+# Higher = lower CPU/GPU load, more stutter on the PAG side.
+./build/vm_iot_ctl pag set-replace-image-every 2
 ```
 
-The full protocol is documented at the top of
-[src/control/control_channel.h](src/control/control_channel.h).
+Build-time toggle: the actual libpag link is gated by
+`-DVM_IOT_ENABLE_LIBPAG=ON` at CMake configure time. With it OFF, the
+`filter.pag.*` config is parsed but the stage is skipped at runtime
+(handy for CI / minimal builds).
 
 ---
 
@@ -366,14 +404,6 @@ the winner. The same code is exposed as a stand-alone tool:
 
 Use this to sanity-check what the daemon will pick, or to diff against
 `v4l2-ctl --list-formats-ext -d /dev/video0`.
-
----
-
-## Logging
-
-All logs go through `spdlog`. The level comes from `log.level` (or
-`--log-level`). Use `debug` or `trace` to see the full pipeline string
-(pretty-printed by `src/common/launch_pretty.h`) and per-client events.
 
 ---
 

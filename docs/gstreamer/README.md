@@ -7,38 +7,63 @@
 
 ```text
 [source]
-  v4l2src  ─►  image/jpeg, 1280x720@60
-              └─► jpegparse ─► jpegdec
+  v4l2src  ─►  image/jpeg, 1280x720@60   (或 raw caps，由 V4L2Prober + CapsRanker 选出)
+              └─► jpegparse ─► jpegdec     (仅 jpeg 路径)
                   └─► videoconvert ─► videoscale ─► videorate
-                      └─► video/x-raw, I420, 1280x720@30
+                      └─► video/x-raw, I420, 1280x720@30   (下游统一 caps，cfg.capture.pixfmt)
                           └─► videoconvert
-                              └─► glupload ─► glcolorconvert
+                              └─► [GL filter 段可选] glupload ─► glcolorconvert
                                   └─► glshader (name=f0)
-                              └─► glcolorconvert ─► gldownload
-                                  └─► videoconvert
-        └─► [pagfilter]                # pag-file 空时 passthrough；非空则按 .pag 渲染并 alpha-blend 到 I420，支持 PLAYING 热切（cfg.filter.pag.* + iotcamctl pag *）
-                                          └─► tee  name=t        # raw 锚点
-                                                   ├──► [branch:snapshot]
-                                                   │     queue ─► valve(snap_valve)
-                                                   │       └─► videoconvert
-                                                   │           └─► jpegenc
-                                                   │               └─► multifilesink(snap_sink)
-                                                   │
-                                                   └──► (主线编码段)
-                                                         queue ─► videoconvert ─► x264enc ─► h264parse
-                                                           └─► tee  name=enc_t   # 码流锚点
-                                                                ├──► [branch:main]
-                                                                │     queue ─► rtph264pay (pay0)
-                                                                │
-                                                                └──► [branch:record]
-                                                                      queue(no-leaky) ─► valve(rec_valve)
-                                                                        └─► identity(rec_tail)        # 稳定锚点
-                                                                              ┊
-                                                                  [Record 模块运行期动态 link]
-                                                                              ┊
-                                                                              ▼
-                                                                        mp4mux ─► filesink           # 每段一个独立子 bin
+                                      └─► glcolorconvert ─► gldownload
+                                          └─► videoconvert
+                                              └─► [pagfilter (name=pag0)，可选]
+                                                # cfg.filter.pag.enabled=true 时插入；pag-file 为空时 passthrough，
+                                                # 非空则按 .pag 渲染并 alpha-blend 到 I420，支持 PLAYING 热切
+                                                # (cfg.filter.pag.* + iotcamctl pag *)
+                                                  └─► tee  name=t        # raw 锥点
+                                                       ├──► [branch:snapshot]
+                                                       │     queue (leaky=downstream, max-buffers=2, silent=true)
+                                                       │       └─► valve(snap_valve, drop=true)
+                                                       │           └─► videoconvert ─► jpegenc
+                                                       │               └─► multifilesink(snap_sink, post-messages=true)
+                                                       │
+                                                       └──► (主线编码段)
+                                                             queue (leaky=downstream, max-buffers=2)
+                                                               └─► videoconvert ─► video/x-raw,format=I420
+                                                                   └─► x264enc / openh264enc / x265enc
+                                                                       └─► h264parse | h265parse (config-interval=1)
+                                                                           └─► tee  name=enc_t   # 码流锥点
+                                                                                ├──► [branch:main]
+                                                                                │     queue (leaky=downstream, max-buffers=2)
+                                                                                │       └─► rtph264pay | rtph265pay
+                                                                                │           name=pay0 pt=96 mtu=1400
+                                                                                │
+                                                                                └──► [branch:record]   ⏳ 规划中
+                                                                                      # append_branch_record() 当前为空实现，
+                                                                                      # 所以 launch 串里不会出现录像副线。
+                                                                                      # 待恢复时重新接 mp4mux + filesink 子 bin。
 ```
+
+拓扑说明：
+
+- **锥点二选一**：要“像素”去 `tee name=t`，要“码流”去 `tee name=enc_t`。
+  新增副线严禁再起第三个 tee。
+- **副线首件必须是 queue**：snapshot / detect / motion 这类“可丢”副线用
+  `leaky=downstream`；record 这类“不可丢”副线要用 no-leaky 大缓冲。
+- **valve 默认 drop=true**：副线首端黑顺关闭，由 `ControlChannel`
+  要用时才打开。snapshot 才会出现“单帧 jpeg”的效果。
+- **编码后才走 tee**：main RTP 与未来的 record 副线共用同一份
+  H.264 / H.265 ES，录像不需要重新编码。
+
+码流锥点还计划了两条未启用的副线（代码里只预留插槽）：
+
+| 副线       | 锥点    | 落点            | 状态与 queue 策略                       |
+|------------|---------|-----------------|---------------------------------------|
+| main(rtp)  | enc_t.  | rtph26Xpay      | 已实现 / leaky=downstream(2)             |
+| snapshot   | t.      | jpegenc + file  | 已实现 / leaky=downstream(2)             |
+| record     | enc_t.  | mp4mux + file   | 规划中 / 预计 no-leaky 大缓冲          |
+| detect     | t.      | appsink         | 规划中 / leaky=downstream(2)             |
+| motion     | t.      | msg / event     | 规划中 / leaky=downstream(2)             |
 
 ## 分类目录
 
@@ -80,8 +105,9 @@
 
 ### 附：已不在主线使用
 - [splitmuxsink](./splitmuxsink.md) —— 容器边界自动切片。早期录像副线方案，
-  因 split-now 语义"切完旧段立刻开新段"无法优雅 stop，已替换为
-  `identity 锚点 + 动态 mp4mux+filesink 子 bin`（业内方案 1）。文档保留作为历史参考。
+  因 split-now 语义“切完旧段立刻开新段”无法优雅 stop，已替换为
+  `identity 锥点 + 动态 mp4mux+filesink 子 bin`。录像副线本身当前也未启用
+  （见上方拓扑 *⏳ 规划中* 标记），文档作为历史参考保留。
 
 ## 阅读建议
 
