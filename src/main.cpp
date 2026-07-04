@@ -8,6 +8,8 @@
 #include "pag_sticker.h"
 #include "pag_effect.h"
 #include "control_channel.h"
+#include "face_branch.h"
+#include "face_prober.h"
 #include <memory>
 #include "log.h"
 #include "v4l2_prober.h"
@@ -123,6 +125,27 @@ int main(int argc, char** argv) {
         return 3;
     }
 
+    /* face 副线启动期检查：facedetect element 与 cascade xml 都必须就绪。
+     * 仅在 cfg.face.enabled=true 时生效；失败与 v4l2/alsa 同款退出码 5。 */
+    {
+        std::string face_err;
+        if (!face_prober::is_ready(cfg.face, &face_err))
+        {
+            LOGE("face_prober: {}", face_err);
+            std::fprintf(stderr,
+                         "\n"
+                         "=============================================\n"
+                         "  ERROR: Face detect branch not ready\n"
+                         "  Reason: %s\n"
+                         "=============================================\n"
+                         "  → Disable in yaml: face.enabled: false\n"
+                         "  → Or fix the underlying issue per the message above\n"
+                         "=============================================\n\n",
+                         face_err.c_str());
+            return 5;
+        }
+    }
+
     GMainLoop* loop = g_main_loop_new(nullptr, FALSE);
     install_signals(loop);
 
@@ -176,9 +199,20 @@ int main(int argc, char** argv) {
      * pag_branch 仅在 filter.pag.enabled=true 时入列：pipeline 里没有 pag0 元素时
      * BranchBase 会 warn 一行然后无害跳过，但提前过滤可以让日志更干净。
      */
+    std::unique_ptr<FaceBranch> face_branch;
+#if VM_IOT_ENABLE_FACEDETECT
+    if (cfg.face.enabled) {
+        face_branch = std::make_unique<FaceBranch>();
+        face_branch->configure(cfg.face);
+    }
+#endif
+
     std::vector<BranchBase*> branches{&snapshot};
     if (pag_branch) {
         branches.push_back(pag_branch.get());
+    }
+    if (face_branch) {
+        branches.push_back(face_branch.get());
     }
 
     if (!server.start(cfg, cfg.filter.enabled ? &filter : nullptr, branches))
@@ -199,6 +233,7 @@ int main(int argc, char** argv) {
                &server,
                &snapshot,
                pag_branch.get(),
+               face_branch.get(),
                start_time);
 
     g_main_loop_run(loop);             // 阻塞，SIGINT/SIGTERM 退出
@@ -209,6 +244,9 @@ int main(int argc, char** argv) {
      *   3) 最后停 RtspServer / filter：释放 server 与共享资源。 */
     ctrl.stop();
     snapshot.shutdown();
+    if (face_branch) {
+        face_branch->shutdown();
+    }
     if (pag_branch) {
         pag_branch->shutdown();
     }

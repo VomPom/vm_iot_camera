@@ -418,37 +418,3 @@ ctest --test-dir build --output-on-failure
 `rtph264pay` ……)。入口在
 [docs/gstreamer/README.md](docs/gstreamer/README.md)。pipeline 里
 每引入一个新 element,这里都会同步补一份 `<element>.md`。
-
----
-
-## 故障排查
-
-- `load config failed: bad file: assets/config/default.yaml` —— 在
-  含有 `assets/` 的目录下运行二进制,或者用 `-c` 显式指定配置路径。
-  正常 `cmake --build` 之后从 `build/` 运行可以工作,因为有软链。
-- `gst_rtsp_server_attach failed (port 8554 in use?)` —— 端口被另
-  一个进程占了;改 `server.port` 或加 `--port`。
-- 客户端黑屏 / 没画面 —— 检查摄像头是否真的支持请求的
-  `width / height / framerate / pixfmt` 组合。跑
-  `./build/probe_dev /dev/video0` 或
-  `v4l2-ctl --list-formats-ext -d /dev/video0` 确认。
-- `unknown encoder backend: ...` —— `encoder.backend` 必须是
-  `x264 | openh264 | x265` 之一。
-- HEVC 客户端播不出来 —— `backend: x265` 时服务端发的是 H.265 RTP
-  流(`rtph265pay`),需要播放器支持 HEVC。新版 VLC 与 `ffplay` 可
-  以,大部分浏览器和移动端播放器不行。
-- `vm_iot_ctl` 退出码 `10` —— 请求或应答 FIFO 不存在。检查守护进
-  程是否在运行,以及 YAML 里 `control.request_fifo` /
-  `control.reply_fifo` 是否跟 `vm_iot_ctl` 看的路径一致(`--ctl` /
-  `--reply` 或 `IOTCAM_CTL` / `IOTCAM_REPLY`)。
-- `vm_iot_ctl` 退出码 `11` —— 应答 FIFO 上有别的 `vm_iot_ctl` 持
-  着锁。等待,或者在你理解后果(可能读到别的实例的回执)的前提下
-  加 `--no-lock`。
-- `vm_iot_ctl` 退出码 `124` —— 守护进程没在限定时间内回执。增加
-  `--timeout`,或检查守护进程日志。
-
----
-
-## 许可证
-
-待定。

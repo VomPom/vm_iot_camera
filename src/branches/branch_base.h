@@ -86,6 +86,21 @@ protected:
      * 默认空实现。 */
     virtual void on_detaching_locked() {}
 
+public:
+    /* pipeline bus 消息的同步分发钩子。RtspServer 使用
+     * gst_bus_enable_sync_message_emission + "sync-message" signal（不影响 bus 自己
+     * 的 sync handler slot），在 streaming 线程同步 emit 时 for-each
+     * 调用每个 branch 的本方法，让 branch 无需自己订阅 bus 也能收到 bus 消息
+     * （比如 facedetect element message、ERROR 等）。
+     *
+     * 重要约束：
+     *   - 本回调运行在 GStreamer streaming 线程，不能做阻塞 IO / 长耗时活。
+     *   - 消息所有权仍属于 bus，实现里禁止 gst_message_unref。
+     *   - 需要访问业务状态时应自行加自己的 mu_。
+     *   - **不要**在此触发 state change 或阻塞等待 pad probe。
+     * 默认空实现。 */
+    virtual void on_bus_message_sync(GstMessage* /*msg*/) {}
+
     /* 通过名字取已抓到的元素（不增加 ref，仅在持锁/同步范围内使用；
      * 跨调用/跨线程使用时调用方需自己 gst_object_ref 一份）。 */
     GstElement* element(const char* name) const;

@@ -142,7 +142,10 @@ std::string PipelineBuilder::make_input_caps(const v4l2_prober::Capability& cap,
  *     │ main(rtp)  │ enc_t.   │ rtph26Xpay   │ 已实现  │ leaky=downstream(2)     │
  *     │ snapshot   │ t.       │ jpegenc/file │ 已实现  │ leaky=downstream(2)     │
  *     │ record     │ enc_t.   │ mp4mux+file  │ TODO    │ 原计划 no-leaky 大缓冲     │
- *     │ detect     │ t.       │ appsink      │ 规划中  │ leaky=downstream(2)     │
+ *     │ face       │ t.       │ facedetect+  │ 已实现  │ leaky=downstream(2)     │
+ *     │            │          │ appsink      │        │ (cfg.face.enabled=true) │
+ *     │ face_prev  │ t.       │ facedetect+  │ 可选    │ leaky=downstream(2)     │
+ *     │            │          │ jpegenc+sink │        │ (preview_jpeg.enabled)  │
  *     │ motion     │ t.       │ msg/event    │ 规划中  │ leaky=downstream(2)     │
  *     └────────────┴──────────┴──────────────┴────────┴────────────────────────┘
  *
@@ -197,6 +200,80 @@ static void append_branch_snapshot(std::ostringstream& os) {
 static void append_branch_record(std::ostringstream& /*os*/) {
     // 暂不在 launch 中追加任何录像副线元素；主线 RTSP 推流不受影响。
     // 保留函数名与调用点作为未来恢复的坐标。
+}
+
+/* face 主检测副线：从 raw 锰点 t. 拉 → valve → videorate(节流) → RGB → facedetect → appsink。
+ * - facedetect 输出不走 buffer payload，而是以 GST_MESSAGE_ELEMENT 投在 pipeline bus 上，
+ *   由 FaceBranch 注册的 bus watch 解析。
+ * - appsink max-buffers=2 drop=true sync=false：作为“流终结点”防止 pipeline 堡死，
+ *   FaceBranch 不接 new-sample 信号（坐标全走 bus）。
+ * - profile/nose/mouth/eyes 为空时不注入对应属性，以免 facedetect 启动期
+ *   对空路径报错。 */
+static void append_branch_face(std::ostringstream& os, const FaceConfig& cfg) {
+    os << " t. ! queue max-size-buffers=2 leaky=downstream silent=true"
+       << " ! valve name=face_valve drop="
+       << (cfg.control.enabled_at_start ? "false" : "true");
+
+    if (cfg.rate.fps_limit > 0) {
+        os << " ! videorate"
+           << " ! video/x-raw,framerate=" << cfg.rate.fps_limit << "/1";
+    }
+
+    os << " ! videoconvert ! video/x-raw,format=RGB"
+       << " ! facedetect name=face0 display=false";
+
+    /* facedetect 必填属性：profile-location / nose-location / ... 为 OpenCV plugin 约定名。
+     * 名称与 gst-inspect-1.0 facedetect 输出一致。 */
+    os << " profile=\"" << cfg.detect.cascade << "\"";
+    if (!cfg.detect.profile.empty()) os << " profile-location=\"" << cfg.detect.profile << "\"";
+    if (!cfg.detect.nose.empty())    os << " nose-location=\""    << cfg.detect.nose    << "\"";
+    if (!cfg.detect.mouth.empty())   os << " mouth-location=\""   << cfg.detect.mouth   << "\"";
+    if (!cfg.detect.eyes.empty())    os << " eyes-location=\""    << cfg.detect.eyes    << "\"";
+
+    os << " min-size-width="  << cfg.detect.min_size_px
+       << " min-size-height=" << cfg.detect.min_size_px
+       << " scale-factor="    << cfg.detect.scale_factor
+       << " min-neighbors="   << cfg.detect.min_neighbors;
+
+    /* 主检测坐标全走 pipeline bus（GST_MESSAGE_ELEMENT），
+     * 这里的终结点仅作"数据流出口"防止 pipeline 卡死。
+     * 曾用 appsink max-buffers=2 drop=true：因 FaceBranch 未挂 new-sample
+     * 也不主动 pull-sample，appsink 内部 queue 塞满 2 条后停止让位，
+     * 上游 videorate/facedetect 被 back-pressure 卡住，导致主线只吐 1 条
+     * facedetect message 就再无输出（preview 副线因尾部 valve drop=true
+     * 就地丢字节，不产生 back-pressure，仍可正常出 message）。
+     * 换成 fakesink async=false sync=false silent=true：不做时钟同步、
+     * 收到就扔、不打印，绝无 back-pressure。element name 保持
+     * "face_appsink"，与 FaceBranch::required_elements() 契约保持一致
+     * （该名字只用作 gst_bin_get_by_name 查询，与 factory 类型解耦）。 */
+    os << " ! fakesink name=face_appsink async=false sync=false silent=true";
+}
+
+/* face 画框预览副线（可选）：与主检测副线并列挂在 t. 上。
+ * - 主动以 display=true 让 facedetect 在画面上黄框标记人脸。
+ * - face_prev_valve 默认 drop=true，仅在 ControlChannel “face preview on” 后才出 JPEG。
+ * - face_jpeg_sink emit-signals=false：本期只负责拼进 launch 串，未来接 HTTP
+ *   端点时再在 FaceBranch 里改 emit-signals=true 并接 new-sample。 */
+static void append_branch_face_preview(std::ostringstream&          os,
+                                       const FacePreviewJpegConfig& p,
+                                       const FaceDetectConfig&      d) {
+    os << " t. ! queue max-size-buffers=2 leaky=downstream silent=true";
+    if (p.fps_limit > 0) {
+        os << " ! videorate"
+           << " ! video/x-raw,framerate=" << p.fps_limit << "/1";
+    }
+    os << " ! videoconvert ! video/x-raw,format=RGB"
+       << " ! facedetect display=true"
+       << " profile=\"" << d.cascade << "\""
+       << " min-size-width="  << d.min_size_px
+       << " min-size-height=" << d.min_size_px
+       << " scale-factor="    << d.scale_factor
+       << " min-neighbors="   << d.min_neighbors
+       << " ! videoconvert"
+       << " ! jpegenc quality=" << p.jpeg_quality
+       << " ! valve name=face_prev_valve drop=true"
+       << " ! appsink name=face_jpeg_sink emit-signals=false"
+       <<        " max-buffers=1 drop=true sync=false";
 }
 
 // ============================================================================
@@ -337,8 +414,20 @@ std::string PipelineBuilder::build(const Config& c) {
     /* 3) 主线 RTP：从 enc_t 拉 ES，打 RTP 给 gst-rtsp-server。 */
     append_branch_main_rtp(os, is_h265);
 
-    /* 4) record（TODO）：录像副线暂未实现，调用保留作为未来恢复的锈点。 */
+    /* 4) record（TODO）：录像副线暂未实现，调用保留作为未来恢复的锰点。 */
     append_branch_record(os);
+
+    /* 5) face 人脸检测副线（可选）：从 raw tee=t 拉，主线 RTSP 零侵入。
+     *    检测结果走 pipeline bus 以 GST_MESSAGE_ELEMENT 投递，由 FaceBranch 解析。
+     *    preview_jpeg.enabled=true 时额外挂一条画框 JPEG 预览副线。 */
+#if VM_IOT_ENABLE_FACEDETECT
+    if (c.face.enabled) {
+        append_branch_face(os, c.face);
+        if (c.face.preview_jpeg.enabled) {
+            append_branch_face_preview(os, c.face.preview_jpeg, c.face.detect);
+        }
+    }
+#endif
 
     os << " )";
     return os.str();

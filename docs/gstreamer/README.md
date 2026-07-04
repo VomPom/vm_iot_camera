@@ -27,6 +27,20 @@
                                                        │           └─► videoconvert ─► jpegenc
                                                        │               └─► multifilesink(snap_sink, post-messages=true)
                                                        │
+                                                       ├──► [branch:face]   ✅ 可选（cfg.face.enabled=true 时接入）
+                                                       │     queue (leaky=downstream, max-buffers=2, silent=true)
+                                                       │       └─► valve(face_valve)
+                                                       │           └─► videorate ─► videoconvert(RGB)
+                                                       │               └─► facedetect(name=face0, display=false)
+                                                       │                   └─► appsink(face_appsink)        # 检测结果走 pipeline bus
+                                                       │
+                                                       ├──► [branch:face_preview]   ⏳ 可选（preview_jpeg.enabled=true 时额外挂上）
+                                                       │     queue ─► videorate ─► videoconvert(RGB)
+                                                       │       └─► facedetect(display=true)
+                                                       │           └─► videoconvert ─► jpegenc
+                                                       │               └─► valve(face_prev_valve, drop=true)
+                                                       │                   └─► appsink(face_jpeg_sink)
+                                                       │
                                                        └──► (主线编码段)
                                                              queue (leaky=downstream, max-buffers=2)
                                                                └─► videoconvert ─► video/x-raw,format=I420
@@ -61,8 +75,9 @@
 |------------|---------|-----------------|---------------------------------------|
 | main(rtp)  | enc_t.  | rtph26Xpay      | 已实现 / leaky=downstream(2)             |
 | snapshot   | t.      | jpegenc + file  | 已实现 / leaky=downstream(2)             |
+| face       | t.      | facedetect + appsink | 已实现 / leaky=downstream(2)；cfg.face.enabled=true |
+| face_preview | t.    | facedetect(display=true) + jpegenc + appsink | 可选 / leaky=downstream(2)；preview_jpeg.enabled=true |
 | record     | enc_t.  | mp4mux + file   | 规划中 / 预计 no-leaky 大缓冲          |
-| detect     | t.      | appsink         | 规划中 / leaky=downstream(2)             |
 | motion     | t.      | msg / event     | 规划中 / leaky=downstream(2)             |
 
 ## 分类目录
@@ -90,18 +105,23 @@
 - [tee](./tee.md) —— 单输入多分支零拷贝复制
 - [queue](./queue.md) —— 缓冲与解耦线程边界
 - [valve](./valve.md) —— 数据闸阀（按需开闭）
-- [identity](./identity.md) —— 透传占位元素（项目录像副线锚点 `rec_tail`）
+- [identity](./identity.md) —— 透传占位元素（项目录像副线锰点 `rec_tail`）
 - [pagfilter](./pagfilter.md) —— 自研滤镜（libpag 渲染 + 文本/视频图层 PLAYING 热替换）
 
-### 6. Encoder（编码器）
+### 6. Computer Vision（计算机视觉）
+- [facedetect](./facedetect.md) —— OpenCV Haar 人脸检测（gst-plugins-bad opencv）
+- [videorate](./videorate.md) —— 视频帧率适配器（face 副线把 30 fps 降到 5 fps）
+
+### 7. Encoder（编码器）
 - [x264enc](./x264enc.md) —— H.264 软编（libx264）
 - [jpegenc](./jpegenc.md) —— 单帧 JPEG 软编
 
-### 7. Payloader / Muxer / Sink（封装与落盘）
+### 8. Payloader / Muxer / Sink（封装与落盘）
 - [rtph264pay](./rtph264pay.md) —— H.264 → RTP 打包（RFC 6184）
 - [multifilesink](./multifilesink.md) —— 多文件序列输出
 - [mp4mux](./mp4mux.md) —— ISO BMFF / mp4 容器封装（项目录像副线核心，每段一个独立实例）
 - [filesink](./filesink.md) —— 单文件落盘（与 mp4mux 配对每段一个）
+- [appsink](./appsink.md) —— 应用层接收点（face 副线终结点，未来接 HTTP 端点）
 
 ### 附：已不在主线使用
 - [splitmuxsink](./splitmuxsink.md) —— 容器边界自动切片。早期录像副线方案，

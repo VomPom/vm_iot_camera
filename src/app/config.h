@@ -124,6 +124,67 @@ struct SnapshotConfig {
 
 /* 录像副线（record branch）配置。*/
 
+/* ─────────────────────────── Face（人脸检测副线）─────────────────────────── *
+ *   通过 gst-plugins-bad 中 opencv 子模块提供的 `facedetect` element 实现，
+ *   挂在 raw 锚点 `tee name=t` 的下游副线，主线 RTSP 编码零侵入。
+ *
+ *   形态：
+ *     enabled=true 时在副线插入：
+ *       tee=t. ! queue ! valve(face_valve) ! videorate ! videoconvert(RGB)
+ *              ! facedetect(name=face0, display=false) ! appsink(face_appsink)
+ *     检测结果不走 buffer payload，而是通过 pipeline bus 投 element message
+ *     `Element/facedetect`，由 FaceBranch 注册的 bus watch 解析坐标。
+ *
+ *     enabled=true 且 preview_jpeg.enabled=true 时再额外挂一条画框 JPEG 预览副线：
+ *       tee=t. ! queue ! videorate ! convert ! facedetect(display=true)
+ *              ! convert ! jpegenc ! valve(face_prev_valve) ! appsink(face_jpeg_sink)
+ *     默认 face_prev_valve=drop=true，仅在 ControlChannel 显式打开后才出 JPEG。
+ *
+ *   兼容性：
+ *     默认 enabled=false，旧 yaml 不写 face: 时 launch 字符串与改造前 100% 一致。
+ *
+ *   详细方案见 docs/task/face.md。 */
+struct FaceDetectConfig {
+    /* OpenCV haarcascade xml 路径；apt 包 libopencv-data 默认安装到 /usr/share/opencv4/haarcascades。
+     * 启动期由 face_prober 做 stat 强检查，不存在则人类可读错误 + 退出码 5。 */
+    std::string cascade = "/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml";
+
+    /* 可选辅助级联：profile=侧脸；nose/mouth/eyes=部位级联；为空字符串时不注入对应属性。 */
+    std::string profile;
+    std::string nose;
+    std::string mouth;
+    std::string eyes;
+
+    int   min_size_px    = 80;     // 检测最小边长（像素），允许 [24, 1024]
+    float scale_factor   = 1.25f;  // Haar 多尺度搜索步长，允许 [1.05, 2.0]
+    int   min_neighbors  = 1;      // 投票阈值，越大越严，允许 [1, 10]
+    bool  detect_per_frame = true;  // true=每帧都检；false=配合 rate.fps_limit 降采样
+};
+
+struct FaceRateConfig {
+    int fps_limit = 5;             // 副线检测节流帧率；0 表示不限速；允许 [0, 30]
+};
+
+struct FacePreviewJpegConfig {
+    bool enabled      = false;     // 是否额外挂一路画框 JPEG 预览副线
+    int  jpeg_quality = 70;        // 1~100
+    int  fps_limit    = 2;         // JPEG 预览输出 fps 上限；0 表示不限速；允许 [0, 30]
+};
+
+struct FaceControlConfig {
+    bool enabled_at_start = true;  // 启动期是否打开 face_valve（false=不检直到运行期 face on）
+    bool emit_when_empty  = false; // count=0 时是否也上报事件（默认仅有人时上报）
+    int  cooldown_ms      = 200;   // 同一帧/连续帧的事件聚合节流；允许 [0, 5000]
+};
+
+struct FaceConfig {
+    bool                  enabled = false;   // 总开关；false 时 pipeline 不插入任何 face 段
+    FaceDetectConfig      detect;
+    FaceRateConfig        rate;
+    FacePreviewJpegConfig preview_jpeg;
+    FaceControlConfig     control;
+};
+
 struct Config {
     ServerConfig   server;
     CaptureConfig  capture;
@@ -132,6 +193,7 @@ struct Config {
     FilterConfig   filter;
     ControlConfig  control;
     SnapshotConfig snapshot;
+    FaceConfig     face;
     // TODO(record): 重开录像时恢复  RecordConfig record;
 
     std::string config_dir;

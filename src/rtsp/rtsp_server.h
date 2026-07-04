@@ -49,10 +49,31 @@ private:
     static void on_media_prepared(GstRTSPMedia* media, gpointer user);
     static void on_media_unprepared(GstRTSPMedia* media, gpointer user);
 
-    /* ---- pipeline bus watch ----
-     * 在 GLib 主线程异步回调，仅做日志记录，不主动 unprepare。
-     * 返回 TRUE 表示继续监听；FALSE 表示移除。 */
+    /* ---- pipeline bus 处理【sync-message signal 模式】----
+     * 使用 gst_bus_enable_sync_message_emission + "sync-message" signal
+     * 而不使用 gst_bus_set_sync_handler，也不使用 add_watch / add_signal_watch。
+     * 背景（逆向精选）：
+     *   1) media-configure / on_attached_locked 由 gst-rtsp-server 在 client 工作
+     *      线程回调，add_watch/add_signal_watch 内部 GSource 会被 attach 到
+     *      "调用时线程的 thread-default GMainContext"；那个 context 上没有 loop
+     *      在跑 → 回调永不触发。而主线程 default context 已被 main.cpp
+     *      g_main_loop_run acquire，工作线程 push_thread_default 它会 assert。
+     *   2) gst_bus_set_sync_handler 将 slot 全部占住，会覆盖 rtsp-server / bin
+     *      内部可能在未来版本依赖的 sync handler 行为（官方文档：“usually
+     *      only called by the creator of the bus”）。实际上也确实存在副作用：
+     *      pipeline preroll 因 sync handler PASS 取代默认行为后，rtpbin/videosink
+     *      的 STATE_CHANGED / ASYNC_DONE 派发时序发生变化，导致 rtsp-server
+     *      内部 async watch 拿不到预期中的 preroll 完成信号 → 推不出画面。
+     *   3) gst_bus_enable_sync_message_emission 是 GStreamer 官方为“多订阅者
+     *      同步获取消息”专门设计的 API，引用计数式、不影响 bus 自己的
+     *      sync handler slot，多个 g_signal_connect("sync-message") 可以共存。
+     *   4) sync-message signal 在发送方的 streaming 线程同步 emit，与 sync
+     *      handler 同一线程语义，处理时仍需严遵“不阻塞、不重业务”。
+     *   5) 一个 bus 可以多个 signal handler 同时存在，本服务器 + 各 branch
+     *      都可以各自 g_signal_connect（本项目采取 RtspServer 独占、内部广播
+     *      的方式避免多路径干扰）。 */
     static gboolean on_bus_message(GstBus* bus, GstMessage* msg, gpointer user);
+    static void     s_on_sync_message(GstBus* bus, GstMessage* msg, gpointer user);
 
     GstRTSPServer*       server_  = nullptr;
     GstRTSPMountPoints*  mounts_  = nullptr;
@@ -61,6 +82,17 @@ private:
 
     ShaderFilter*            filter_   = nullptr;   // 不拥有，仅持指针
     std::vector<BranchBase*> branches_;             // 不拥有，仅持指针
+
+    /* pipeline bus 与 sync-message signal 的生命周期：
+     *   media-configure   : gst_bus_enable_sync_message_emission(bus)
+     *                       + g_signal_connect(bus, "sync-message", ...)
+     *   media-unprepared  : g_signal_handler_disconnect + 
+     *                       gst_bus_disable_sync_message_emission(bus)
+     *                       + gst_object_unref(bus)
+     * enable/disable 严格成对回收引用计数，避免影响其他订阅者。 */
+    GstBus*             bus_                     = nullptr;   // 持 ref
+    gulong              bus_handler_id_          = 0;         // g_signal_connect 返回值
+    bool                bus_sync_emit_enabled_   = false;
 };
 
 #endif //VM_IOT_RTSP_SERVER_H
