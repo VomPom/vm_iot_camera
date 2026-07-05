@@ -1,15 +1,12 @@
-# vm_iot
+# vm_iot_camera
 
 [English](README.md) · **简体中文**
 
 一个轻量的 RTSP 摄像头守护进程。它从 V4L2 设备拉帧,经过一段可选的
-GLSL 后处理滤镜,用纯软件 H.264 / H.265 后端编码,最后通过
-`gst-rtsp-server` 把流暴露出去。
-
-它的目标场景是 Linux IoT 与边缘盒子:你想要一个**配置驱动**的可执行
-文件,而不是一坨手工维护的 `gst-launch` shell 脚本。配套的第二个二
+GLSL 后处理 libpag 特效滤镜,用纯软件 H.264 / H.265 后端编码,最后通过
+`gst-rtsp-server` 把流暴露出去，Web 平台可视化控制，配套第二个二
 进制 `vm_iot_ctl` 通过一对 FIFO 与正在运行的守护进程通信,可以在不
-重启流的前提下切换特效、抓帧、查询状态。
+重启流的前提下切换特效、抓帧、查询状态等逻辑。
 
 项目目前在 **Raspberry Pi 5(8 GB)** + **Ubuntu 24.04** 上开发与验
 证,USB UVC 摄像头从前置 USB 口接入。RTSP 守护进程、控制 FIFO、
@@ -23,9 +20,8 @@ Web 控制台全部跑在这一台设备上。
 
 ## Demo
 
-仓库内附带一个 Web 控制台(独立进程提供服务),它在浏览器里嵌入实时
-RTSP 画面,通过调用 `vm_iot_ctl` 来切换 shader、开关 PAG 贴纸、抓
-帧、查看状态 —— 在局域网里用手机也能正常使用。
+下面几张截图与录屏摘自实机运行,涵盖桌面/移动端 Web 控制台、实时画
+面回放、控制台交互与人脸检测叠加。
 
 <table>
   <tr>
@@ -54,6 +50,15 @@ RTSP 画面,通过调用 `vm_iot_ctl` 来切换 shader、开关 PAG 贴纸、抓
       <sub>点击 GIF 打开高质量 MP4。</sub>
     </td>
   </tr>
+  <tr>
+    <td align="center" colspan="2">
+      <b>人脸检测 Demo</b><br/>
+      <a href=".imgs/face.mp4" title="点击播放 face.mp4">
+        <img src=".imgs/face.gif" alt="实时人脸检测叠加框(点击查看 MP4)" width="60%"/>
+      </a><br/>
+      <sub>实时人脸检测 + 检测框叠加。点击 GIF 打开高质量 MP4。</sub>
+    </td>
+  </tr>
 </table>
 
 ---
@@ -70,12 +75,39 @@ RTSP 画面,通过调用 `vm_iot_ctl` 来切换 shader、开关 PAG 贴纸、抓
 - **GL shader 滤镜,运行期热切。** 单一文件 `effects.frag` 容纳所
   有变体(passthrough / mosaic / invert / ...),`filter_type`
   在运行期决定走哪个分支。切换时着色器**程序不重新编译**,因此画
-  面不会卡顿。
-- **基于 FIFO 的实时控制。** 守护进程侧的 `ControlChannel` 监听一
-  个命名管道,`vm_iot_ctl` 是配套的客户端。命令包括 `filter`、
-  `reload`、`status`、`snapshot`、`pag` 等。
+  面不会卡顿。运行期还可以 `reload` 从磁盘重新加载 shader。
+- **libpag 素材热叠加。** 自研 `pagfilter` element 可以把 `.pag`
+  素材(贴纸/字幕/动画)在 `PLAYING` 状态下**热切素材文件、替换
+  文本图层、开画中画(把当前视频帧塞进 PAG 图层)、调节画中画上
+  行帧率**;构建期通过 `-DVM_IOT_ENABLE_LIBPAG=ON` 决定是否真的
+  链接 libpag(关掉时相关配置解析仍生效,运行期跳过该段,方便 CI
+  与最小化构建)。
+- **基于 FIFO 的实时控制。** 守护进程侧的 `ControlChannel` 监听
+  一个命名管道,`vm_iot_ctl` 是配套客户端。命令包括 `filter`、
+  `reload`、`status`、`snapshot`、`pag`、`face`、`raw` 等。
 - **抓帧。** 编码器旁边挂着一个 `tee` + `valve` 分支;`snapshot`
   命令会打开 valve 一帧的时间,把当帧写成 JPEG。
+- **人脸检测副线。** 从原始像素锥点接一条独立分支,跑 `gst-plugins-bad`
+  的 OpenCV Haar `facedetect`,默认 5 fps 节流。主 RTSP 线路完全零侵入
+  (`display=false`,不改一个像素);检测坐标通过 pipeline bus 上报,
+  `FaceBranch` 汇聚后写入 events FIFO(NDJSON `kind:"faces"`),Web 控
+  制台通过 WebSocket 订阅并在 `<video>` 上叠 canvas 画框。运行期用
+  `vm_iot_ctl face on/off` 开关。
+- **一体化 Web 控制台。** [`web/`](web/) 下 Fastify + 单文件 ESM
+  前端,把 daemon 完整功能面搬进浏览器:
+  - **多协议画面预览** —— WebRTC(通过 mediamtx WHEP,低延迟)/
+    HLS(兼容性兜底)/ 裸 RTSP URL 三档一键切换;
+  - **人脸框实时叠加** —— canvas 层跟着 `<video>` 缩放,可一键关闭;
+  - **控制面板** —— filter 切换/上下轮/`reload`、snapshot、pag
+    (set-file/set-text/set-replace-image/throttle)、record
+    (rec / stop / auto N 秒;后端副线仍在规划中,面板 UI 已就绪)、
+    raw 命令输入框;
+  - **实时状态** —— 顶栏与状态卡通过 `/ws/events` 订阅 daemon 1 Hz
+    status 广播,自动刷新 uptime / 客户端数 / 码率 / 编码器 / 分辨率
+    / 当前 filter / PAG 素材;
+  - **快捷键** —— `1-9` 切 filter、`Space` 抓帧、`R` 录制开关、
+    `/` 聚焦 raw 输入框;
+  - **响应式布局** —— 桌面双列、移动端(≤1024px)单列纵向堆叠。
 - **所有 RTSP 客户端共用同一条 pipeline**
   (`gst_rtsp_media_factory_set_shared(TRUE)`),CPU 不会随观看人
   数线性增长。
@@ -246,6 +278,19 @@ ffplay rtsp://127.0.0.1:8554/live
                                                        │           └─► videoconvert ─► jpegenc
                                                        │               └─► multifilesink(snap_sink, post-messages=true)
                                                        │
+                                                       ├──► [branch:face]         # cfg.face.enabled=true 时才存在
+                                                       │     queue (leaky=downstream, max-buffers=2, silent=true)
+                                                       │       └─► valve(face_valve, drop=<!enabled_at_start>)
+                                                       │           └─► videorate ─► video/x-raw,framerate=<fps_limit>/1
+                                                       │               └─► videoconvert ─► video/x-raw,format=RGB
+                                                       │                   └─► facedetect(name=face0, display=false,
+                                                       │                                  profile=<cascade>, min-size-*=<min_size_px>,
+                                                       │                                  scale-factor=<scale_factor>,
+                                                       │                                  min-neighbors=<min_neighbors>)
+                                                       │                       └─► fakesink(face_appsink, async=false, sync=false, silent=true)
+                                                       │                       # 坐标走 GST_MESSAGE_ELEMENT('facedetect')
+                                                       │                       # → FaceBranch → events FIFO(NDJSON kind:"faces") → Web canvas 叠框
+                                                       │
                                                        └──► (主线编码段)
                                                              queue (leaky=downstream, max-buffers=2)
                                                                └─► videoconvert ─► video/x-raw,format=I420
@@ -281,8 +326,8 @@ ffplay rtsp://127.0.0.1:8554/live
 |------------|---------|-----------------|------------|--------------------------|
 | main(rtp)  | enc_t.  | rtph26Xpay      | 已实现     | leaky=downstream(2)      |
 | snapshot   | t.      | jpegenc + file  | 已实现     | leaky=downstream(2)      |
+| face       | t.      | facedetect + fakesink（bus msg → events FIFO） | 已实现 | leaky=downstream(2) |
 | record     | enc_t.  | mp4mux + file   | 规划中     | non-leaky、大缓冲          |
-| detect     | t.      | appsink         | 规划中     | leaky=downstream(2)      |
 | motion     | t.      | msg / event     | 规划中     | leaky=downstream(2)      |
 
 拓扑里出现的每个 element 在 [docs/gstreamer/](docs/gstreamer/README.md)
@@ -337,7 +382,40 @@ ms,运行期只依赖 libc 与 libstdc++。
 
 # 直接发送原始协议行(调试用)
 ./build/vm_iot_ctl raw "filter set 1"
+
+# 人脸检测副线(控 face_valve不重启 pipeline)
+./build/vm_iot_ctl face on           # 打开 face_valve，开始检测
+./build/vm_iot_ctl face off          # 关闭 face_valve，暂停检测
+./build/vm_iot_ctl face get          # 查询当前开关状态（on / off）
 ```
+
+### 人脸检测
+
+`face.enabled: true`（[assets/config/default.yaml](assets/config/default.yaml)
+里默认已开）时，守护进程会在 raw 锥点 `tee name=t` 下多拉一条
+副线，跑 OpenCV Haar `facedetect`。检测坐标走 GStreamer bus
+消息，经 `FaceBranch` 聊合（按面积降序取 top-N=8，叠加
+`cooldown_ms` 节流）后以 `kind:"faces"` 的 NDJSON 行写入 events
+FIFO。Web 控制台通过 `/ws/events` 订阅，在 `<video>` 上叠 canvas
+实时画框 —— RTSP 主线本身从不带框(`display=false`)，录制 / 二
+次编码不会把框英进去。
+
+相关配置项均在 `face.*` 下：
+
+| 配置项 | 含义 |
+|---|---|
+| `face.enabled` | 总开关。`false` 时 pipeline 完全不插入副线。 |
+| `face.detect.cascade` | Haar XML 路径（一般 `haarcascade_frontalface_default.xml`）。 |
+| `face.detect.min_size_px` | 检测矩形最小边长；越大越快、误检越少。 |
+| `face.detect.scale_factor` / `min_neighbors` | 标准 OpenCV 多尺度 + 投票阈值。 |
+| `face.rate.fps_limit` | 副线检测帧率（`videorate` 节流），默认 5，不建议调高。 |
+| `face.control.enabled_at_start` | 启动时 `face_valve` 是否默认打开；true 即开机自检。 |
+| `face.control.emit_when_empty` | count=0 时是否也上报（调试期建议开）。 |
+| `face.control.cooldown_ms` | 同一事件的聚合窗口，防 bus 风暴。 |
+
+events FIFO 的报文格式见
+[docs/control/event_fifo.md](docs/control/event_fifo.md)；element 本身的
+写真见 [docs/gstreamer/facedetect.md](docs/gstreamer/facedetect.md)。
 
 ### PAG 叠加控制
 
@@ -409,12 +487,3 @@ ctest --test-dir build --output-on-failure
   于在守护进程之外排查采集或编码问题。
 - `scripts/bench/` —— 编码器基准测试(例如 `h265_compare.sh`)。
 
----
-
-## GStreamer Element 文档
-
-`docs/gstreamer/` 下为 pipeline 中用到的每个 element 维护了一份单
-页速查文档(`v4l2src`、`videoconvert`、`glshader`、`x264enc`、
-`rtph264pay` ……)。入口在
-[docs/gstreamer/README.md](docs/gstreamer/README.md)。pipeline 里
-每引入一个新 element,这里都会同步补一份 `<element>.md`。

@@ -17,8 +17,7 @@
 //        gst_bus_enable_sync_message_emission + "sync-message" signal，
 //        在 streaming 线程同步广播给每个 branch 的 on_bus_message_sync，
 //        本类在 override 里仅消费 `facedetect` 元消息与 ERROR。好处：
-//          - 无 GMainContext / thread-default 陷阱（之前处 rtsp-server client 工作线程
-//            里无法拿到主 loop context 的根因完全绕开）；
+//          - 无 GMainContext / thread-default 陷阱 ；
 //          - 不叠加 sync handler slot，不影响 rtsp-server 内部 preroll。
 //     3) 解析 faces 数组（按面积降序保留前 N=8）；
 //     4) 应用 cooldown_ms 节流 + emit_when_empty 策略，更新 last_state_，
@@ -28,17 +27,6 @@
 //        给上层调；上述 setter 全部加 mu_ 保护。
 //     6) detach 时无需自己处理 bus（无订阅），直接让 BranchBase
 //        unref 元素，遵守 branch_base.h 的 detach 顺序契约。
-//
-//   生命周期约束（沿用 BranchBase）：
-//     - 单元素抓不到 → 全部回滚；
-//     - on_detached_locked 先于元素 unref 调用，可安全访问 element()；
-//     - mu_ 同时保护元素引用与业务状态，setter 与 attach/unprepared 互斥。
-//
-//   作用域（明确不做的事）：
-//     - 不接管像素读取：fakesink 只作“流终结点”防 pipeline 卡死；
-//     - 不直接画框：前端在视频上叠 canvas 基于 events FIFO 推送的坐标
-//       实时绘制，管道内不再做 JPEG 预览副线；
-//     - 不持久化事件：last_state_ 仅保最后一次；HTTP / SQLite 落盘留待后续。
 //
 
 
@@ -53,7 +41,6 @@
 #include <string>
 #include <vector>
 
-#include <glib.h>
 #include <gst/gst.h>
 
 #include "branch_base.h"

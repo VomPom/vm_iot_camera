@@ -113,6 +113,7 @@
 - [multifilesink](./multifilesink.md) —— 多文件序列输出
 - [mp4mux](./mp4mux.md) —— ISO BMFF / mp4 容器封装（项目录像副线核心，每段一个独立实例）
 - [filesink](./filesink.md) —— 单文件落盘（与 mp4mux 配对每段一个）
+- [fakesink](./fakesink.md) —— 数据黑洞 / 合规终点（face 副线终点 `face_appsink`：坐标走 pipeline bus，字节丢弃）
 - [appsink](./appsink.md) —— 应用层接收点（通用文档；本工程当前副线终点使用 `fakesink`：见 face 分支）
 
 ### 附：已不在主线使用

@@ -15,38 +15,56 @@
 #include <cmath>
 #include <cstdint>
 
-std::string PipelineBuilder::encoder_str(const EncoderConfig& e, std::string& src_fmt) {
+std::string PipelineBuilder::encoder_str(const EncoderConfig& e, std::string& src_fmt)
+{
+    // C++ 的 switch 不吃 std::string，先把后端名映射到内部枚举再分派。
+    // 三种后端都吃 I420，src_fmt 提前一并写好。
+    enum class Backend { X264, OPENH264, X265, UNKNOWN };
+    Backend backend = Backend::UNKNOWN;
+    if (e.backend == "x264") backend = Backend::X264;
+    else if (e.backend == "openh264") backend = Backend::OPENH264;
+    else if (e.backend == "x265") backend = Backend::X265;
+
+    src_fmt = "I420";
     std::ostringstream os;
-    if (e.backend == "x264") {
-        // x264enc 直接吃 I420，零拷贝最少绕路。
-        src_fmt = "I420";
-        os << "x264enc"
-           << " tune=zerolatency"
-           << " speed-preset=ultrafast"
-           << " bitrate=" << e.bitrate_kbps
-           << " key-int-max=" << e.gop
-           << " bframes=" << e.bframes;
-    } else if (e.backend == "openh264") {
-        // openh264enc 同样吃 I420；不暴露 bframes（实现上不支持 B 帧）。
-        src_fmt = "I420";
-        os << "openh264enc"
-           << " bitrate=" << (e.bitrate_kbps * 1000)   // openh264 用 bps
-           << " gop-size=" << e.gop
-           << " complexity=low"
-           << " rate-control=bitrate";
-    } else if (e.backend == "x265") {
-        // x265enc 默认极慢，必须显式 ultrafast + zerolatency 才能在 UTM 上跑得动。
-        // 不暴露 bframes（属性名与 x264 不一致，且默认行为已能满足低延迟场景）。
-        src_fmt = "I420";
-        os << "x265enc"
-           << " tune=zerolatency"
-           << " speed-preset=ultrafast"
-           << " bitrate=" << e.bitrate_kbps
-           << " key-int-max=" << e.gop;
-    } else {
-        throw std::runtime_error("unknown encoder backend: " + e.backend
-                                 + " (supported: x264 | openh264 | x265)");
+
+    switch (backend)
+    {
+        case Backend::X264:
+            // x264enc：默认后端，兼容性最好；显式 zerolatency + ultrafast 保证低延迟。
+            os << "x264enc"
+                << " tune=zerolatency"
+                << " speed-preset=ultrafast"
+                << " bitrate=" << e.bitrate_kbps
+                << " key-int-max=" << e.gop
+                << " bframes=" << e.bframes;
+            break;
+
+        case Backend::OPENH264:
+            // openh264enc：备选 H.264，不支持 B 帧；bitrate 单位是 bps，此处 ×1000 换算。
+            os << "openh264enc"
+                << " bitrate=" << (e.bitrate_kbps * 1000)
+                << " gop-size=" << e.gop
+                << " complexity=low"
+                << " rate-control=bitrate";
+            break;
+
+        case Backend::X265:
+            // x265enc：H.265 软编，默认极慢；必须 ultrafast + zerolatency 才能在 UTM 上跑得动。
+            // 不暴露 bframes（属性名与 x264 不一致，默认行为已满足低延迟场景）。
+            os << "x265enc"
+                << " tune=zerolatency"
+                << " speed-preset=ultrafast"
+                << " bitrate=" << e.bitrate_kbps
+                << " key-int-max=" << e.gop;
+            break;
+
+        case Backend::UNKNOWN:
+        default:
+            throw std::runtime_error("unknown encoder backend: " + e.backend
+                + " (supported: x264 | openh264 | x265)");
     }
+
     return os.str();
 }
 
@@ -90,73 +108,6 @@ std::string PipelineBuilder::make_input_caps(const v4l2_prober::Capability& cap,
     return os.str();
 }
 
-/* ─────────────────────────── 管道架构总览 ───────────────────────────
- *
- *   build() 输出一条供 gst-rtsp-server 解析的 launch 字符串。
- *
- *   ★ 取流锚点（tee）命名约定 ★
- *     - tee name=t      → 原始 raw（cfg.capture.pixfmt 已收敛），
- *                         任何需要"像素"的副线从这里拉（snapshot / detect / motion ...）。
- *     - tee name=enc_t  → 编码后 H.264/H.265 elementary stream，
- *                         任何需要"码流"的副线从这里拉（main rtp / record ...）。
- *     新增副线必须二选一锚点，禁止再起其他 tee。
- *
- *   整体结构：
- *
- *      v4l2src
- *         │ (上游 caps 由 V4L2Prober + CapsRanker 决定，jpeg 或 raw 二选一)
- *         ▼
- *      [仅 jpeg 路径]  jpegparse ! jpegdec
- *         │
- *         ▼
- *      videoconvert ! videoscale ! videorate
- *         │ (下游统一 caps：format=cfg.capture.pixfmt + 期望分辨率/帧率)
- *         ▼
- *      videoconvert  ──►  [可选 GL 滤镜段]  ──►  videoconvert
- *                                                       │
- *                                                       ▼
- *                                                 tee  name=t  ◄── raw 锚点
- *                              ┌───────────────────┬────┴────┐
- *                              │                   │         │
- *                       (副线 snapshot)     (主线编码段)  (规划：detect / motion / ai)
- *                              │                   │
- *                              ▼                   ▼
- *                      jpeg 截图            videoconvert ! encoder ! parse
- *                                                   │
- *                                                   ▼
- *                                            tee  name=enc_t  ◄── 码流锚点
- *                                         ┌─────────┴─────────┐
- *                                         │                   │
- *                                  (主线 rtp pay)      (副线 record，TODO)
- *                                         │                   │
- *                                         ▼                   ▼
- *                                  rtph26Xpay name=pay0   暂不追加任何元素
- *                                                                  ↑
- *                                                  录像功能暂未实现，未来在这里
- *                                                  重新接 mp4mux+filesink 子 bin
- *
- *   副线清单：
- *     ┌────────────┬──────────┬──────────────┬────────┬────────────────────────┐
- *     │ 副线        │ 锈点     │ 落点          │ 状态   │ queue 策略              │
- *     ├────────────┼──────────┼──────────────┼────────┼────────────────────────┤
- *     │ main(rtp)  │ enc_t.   │ rtph26Xpay   │ 已实现  │ leaky=downstream(2)     │
- *     │ snapshot   │ t.       │ jpegenc/file │ 已实现  │ leaky=downstream(2)     │
- *     │ record     │ enc_t.   │ mp4mux+file  │ TODO    │ 原计划 no-leaky 大缓冲     │
- *     │ face       │ t.       │ facedetect+  │ 已实现  │ leaky=downstream(2)     │
- *     │            │          │ appsink      │        │ (cfg.face.enabled=true) │
- *     │ motion     │ t.       │ msg/event    │ 规划中  │ leaky=downstream(2)     │
- *     └────────────┴──────────┴──────────────┴────────┴────────────────────────┘
- *
- *   分流原则（添加新副线时遵循）：
- *     1) 二选一锚点：要像素去 t.，要码流去 enc_t.；不再起新 tee。
- *     2) 副线开头必须有 queue：snapshot/detect 类用 leaky=downstream（可丢），
- *        record 类用 no-leaky 大缓冲（落盘不能丢帧）。
- *     3) 副线首端放一个 `valve drop=true` 默认关闭，按需打开。
- *     4) 副线内的元素命名遵循 `<branch>_<role>`（snap_valve / rec_tail / det_appsink）。
- *     5) build() 内部按副线拆分成 append_branch_<x>() 函数。
- *
- * ──────────────────────────────────────────────────────────────────── */
-
 /* 主线编码段（公共上游 → tee name=enc_t）：把编码 + parse 提到 tee 之前，
  * 这样 record 副线可以零成本复用同一份 H.264/H.265 ES。
  * pay0 是 gst-rtsp-server 约定名，必须保留。 */
@@ -196,17 +147,12 @@ static void append_branch_snapshot(std::ostringstream& os) {
 }
 
 static void append_branch_record(std::ostringstream& /*os*/) {
-    // 暂不在 launch 中追加任何录像副线元素；主线 RTSP 推流不受影响。
-    // 保留函数名与调用点作为未来恢复的坐标。
+    // todo::record
 }
 
 /* face 主检测副线：从 raw 锰点 t. 拉 → valve → videorate(节流) → RGB → facedetect → appsink。
  * - facedetect 输出不走 buffer payload，而是以 GST_MESSAGE_ELEMENT 投在 pipeline bus 上，
- *   由 FaceBranch 注册的 bus watch 解析。
- * - appsink max-buffers=2 drop=true sync=false：作为“流终结点”防止 pipeline 堡死，
- *   FaceBranch 不接 new-sample 信号（坐标全走 bus）。
- * - profile/nose/mouth/eyes 为空时不注入对应属性，以免 facedetect 启动期
- *   对空路径报错。 */
+ */
 static void append_branch_face(std::ostringstream& os, const FaceConfig& cfg) {
     os << " t. ! queue max-size-buffers=2 leaky=downstream silent=true"
        << " ! valve name=face_valve drop="
@@ -220,8 +166,6 @@ static void append_branch_face(std::ostringstream& os, const FaceConfig& cfg) {
     os << " ! videoconvert ! video/x-raw,format=RGB"
        << " ! facedetect name=face0 display=false";
 
-    /* facedetect 必填属性：profile-location / nose-location / ... 为 OpenCV plugin 约定名。
-     * 名称与 gst-inspect-1.0 facedetect 输出一致。 */
     os << " profile=\"" << cfg.detect.cascade << "\"";
     if (!cfg.detect.profile.empty()) os << " profile-location=\"" << cfg.detect.profile << "\"";
     if (!cfg.detect.nose.empty())    os << " nose-location=\""    << cfg.detect.nose    << "\"";
@@ -234,16 +178,7 @@ static void append_branch_face(std::ostringstream& os, const FaceConfig& cfg) {
        << " min-neighbors="   << cfg.detect.min_neighbors;
 
     /* 主检测坐标全走 pipeline bus（GST_MESSAGE_ELEMENT），
-     * 这里的终结点仅作"数据流出口"防止 pipeline 卡死。
-     * 曾用 appsink max-buffers=2 drop=true：因 FaceBranch 未挂 new-sample
-     * 也不主动 pull-sample，appsink 内部 queue 塞满 2 条后停止让位，
-     * 上游 videorate/facedetect 被 back-pressure 卡住，导致主线只吐 1 条
-     * facedetect message 就再无输出（preview 副线因尾部 valve drop=true
-     * 就地丢字节，不产生 back-pressure，仍可正常出 message）。
-     * 换成 fakesink async=false sync=false silent=true：不做时钟同步、
-     * 收到就扔、不打印，绝无 back-pressure。element name 保持
-     * "face_appsink"，与 FaceBranch::required_elements() 契约保持一致
-     * （该名字只用作 gst_bin_get_by_name 查询，与 factory 类型解耦）。 */
+     * 这里的终结点仅作"数据流出口"防止 pipeline 卡死。*/
     os << " ! fakesink name=face_appsink async=false sync=false silent=true";
 }
 
@@ -330,10 +265,73 @@ std::string build_source_segment(const Config& c) {
 
 } // namespace
 
-// ============================================================================
-// build()
-// ============================================================================
 
+/* ─────────────────────────── 管道架构总览 ───────────────────────────
+ *
+ *   build() 输出一条供 gst-rtsp-server 解析的 launch 字符串。
+ *
+ *   ★ 取流锚点（tee）命名约定 ★
+ *     - tee name=t      → 原始 raw（cfg.capture.pixfmt 已收敛），
+ *                         任何需要"像素"的副线从这里拉（snapshot / detect / motion ...）。
+ *     - tee name=enc_t  → 编码后 H.264/H.265 elementary stream，
+ *                         任何需要"码流"的副线从这里拉（main rtp / record ...）。
+ *     新增副线必须二选一锚点，禁止再起其他 tee。
+ *
+ *   整体结构：
+ *
+ *      v4l2src
+ *         │ (上游 caps 由 V4L2Prober + CapsRanker 决定，jpeg 或 raw 二选一)
+ *         ▼
+ *      [仅 jpeg 路径]  jpegparse ! jpegdec
+ *         │
+ *         ▼
+ *      videoconvert ! videoscale ! videorate
+ *         │ (下游统一 caps：format=cfg.capture.pixfmt + 期望分辨率/帧率)
+ *         ▼
+ *      videoconvert  ──►  [可选 GL 滤镜段]  ──►  videoconvert
+ *                                                       │
+ *                                                       ▼
+ *                                                 tee  name=t  ◄── raw 锚点
+ *                              ┌───────────────────┬────┴────┐
+ *                              │                   │         │
+ *                       (副线 snapshot)     (主线编码段)  (规划：detect / motion / ai)
+ *                              │                   │
+ *                              ▼                   ▼
+ *                      jpeg 截图            videoconvert ! encoder ! parse
+ *                                                   │
+ *                                                   ▼
+ *                                            tee  name=enc_t  ◄── 码流锚点
+ *                                         ┌─────────┴─────────┐
+ *                                         │                   │
+ *                                  (主线 rtp pay)      (副线 record)
+ *                                         │                   │
+ *                                         ▼                   ▼
+ *                                  rtph26Xpay name=pay0   暂不追加任何元素
+ *                                                                  ↑
+ *                                                  录像功能暂未实现，未来在这里
+ *                                                  重新接 mp4mux+filesink 子 bin
+ *
+ *   副线清单：
+ *     ┌────────────┬──────────┬──────────────┬────────┬────────────────────────┐
+ *     │ 副线        │ 锈点     │ 落点          │ 状态   │ queue 策略              │
+ *     ├────────────┼──────────┼──────────────┼────────┼────────────────────────┤
+ *     │ main(rtp)  │ enc_t.   │ rtph26Xpay   │ 已实现  │ leaky=downstream(2)     │
+ *     │ snapshot   │ t.       │ jpegenc/file │ 已实现  │ leaky=downstream(2)     │
+ *     │ record     │ enc_t.   │ mp4mux+file  │ TODO    │ 原计划 no-leaky 大缓冲     │
+ *     │ face       │ t.       │ facedetect+  │ 已实现  │ leaky=downstream(2)     │
+ *     │            │          │ appsink      │        │ (cfg.face.enabled=true) │
+ *     │ motion     │ t.       │ msg/event    │ 规划中  │ leaky=downstream(2)     │
+ *     └────────────┴──────────┴──────────────┴────────┴────────────────────────┘
+ *
+ *   分流原则（添加新副线时遵循）：
+ *     1) 二选一锚点：要像素去 t.，要码流去 enc_t.；不再起新 tee。
+ *     2) 副线开头必须有 queue：snapshot/detect 类用 leaky=downstream（可丢），
+ *        record 类用 no-leaky 大缓冲（落盘不能丢帧）。
+ *     3) 副线首端放一个 `valve drop=true` 默认关闭，按需打开。
+ *     4) 副线内的元素命名遵循 `<branch>_<role>`（snap_valve / rec_tail / det_appsink）。
+ *     5) build() 内部按副线拆分成 append_branch_<x>() 函数。
+ *
+ * ──────────────────────────────────────────────────────────────────── */
 std::string PipelineBuilder::build(const Config& c) {
     std::string src_fmt;
     std::string enc       = encoder_str(c.encoder, src_fmt);
@@ -362,13 +360,7 @@ std::string PipelineBuilder::build(const Config& c) {
     }
     os << " ! videoconvert";
 
-    /* ── 可选 PAG 自研滤镜段 ──
-     * 位置：GL 段之后、tee 之前，作用在 raw I420 系统内存上，
-     * 与 GL 段解耦——任一段单独 enable 都能跑通。
-     * name=pag0 是约定名，便于未来从 ControlChannel 通过
-     * gst_bin_get_by_name 拿到实例做热控。
-     * pagfilter 在 pag-file 非空时按 .pag 渲染并 alpha-blend 到画面上，
-     * 为空则退化为 passthrough。 */
+    /* ── 可选 PAG 自研滤镜段 ── */
     if (c.filter.pag.enabled) {
         os << " ! pagfilter name=pag0";
     }
