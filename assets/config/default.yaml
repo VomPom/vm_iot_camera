@@ -24,6 +24,7 @@ filter:
   shader: effects.frag                # 单一着色器文件；相对路径以 assets/shaders 为基目录
   filter_type: 0                      # 启动默认特效：0=passthrough 1=mosaic 2=invert
   max_type: 2                         # filter next 循环上限（含），与 shader 内 if 分支保持一致
+
   # PAG 自研滤镜段（自定义 GstElement: pagfilter）
   # enabled=true 时在 pipeline 插入一个 pagfilter 元素，按 file 加载 .pag 并
   # 把渲染结果 alpha-blend 到主线 I420 上。
@@ -52,7 +53,8 @@ filter:
 
 control:
   request_fifo: /tmp/vm_iot.ctl       # 命令请求 FIFO；空串=不开启控制通道
-  reply_fifo:   /tmp/vm_iot.reply     # 命令应答 FIFO；空串=不写回执
+  reply_fifo: /tmp/vm_iot.reply       # 命令应答 FIFO；空串=不写回执
+  event_fifo: /tmp/vm_iot.events      # 事件单向广播 FIFO（NDJSON）；空串=不推送事件
 
 snapshot:
   dir: /tmp/vm_iot/snapshots          # 默认输出目录；snapshot 命令未带 path 时使用
@@ -65,6 +67,31 @@ snapshot:
 #   height: 240
 #   framerate: 5
 #   appsink_max_buffers: 2
+
+# ─────────────────────────── face（人脸检测副线） ───────────────────────────
+# 通过 gst-plugins-bad 中 opencv 子模块提供的 facedetect element 实现，
+# 挂在 raw tee=t 的下游副线，主线 RTSP 编码零侵入。
+# 默认 enabled: false 保留改造前行为；启用时需安装：
+#   sudo apt install gstreamer1.0-opencv libopencv-data
+# 详细方案：docs/task/face.md
+face:
+  enabled: true                      # 总开关；false 时 pipeline 不插入任何 face 段
+  detect:
+    cascade: /usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml
+    profile: ""                       # 侧脸级联，可留空
+    nose: ""                       # 鼻子级联，可留空
+    mouth: ""                       # 嘴部级联，可留空
+    eyes: ""                       # 眼部级联，可留空
+    min_size_px: 80                   # 检测最小边长（像素），允许 [24, 1024]
+    scale_factor: 1.1                 # Haar 多尺度搜索步长，允许 [1.05, 2.0]
+    min_neighbors: 1                  # 投票阈值，越大越严，允许 [1, 10]
+    detect_per_frame: false           # true=每帧都检；false=配合 rate.fps_limit 降采样
+  rate:
+    fps_limit: 5                      # 副线检测节流帧率；0 表示不限速
+  control:
+    enabled_at_start: true            # 启动期是否打开 face_valve（false=不检直到运行期 face on）
+    emit_when_empty: true             # count=0 时是否也上报事件（诊断期打开，稳定后可改回 false）
+    cooldown_ms: 200                  # 同一帧/连续帧的事件聚合节流
 
 log:
   level: info             # trace|debug|info|warn|err

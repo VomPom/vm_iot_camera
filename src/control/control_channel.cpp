@@ -10,6 +10,7 @@
 #include "snapshot.h"
 #include "pag_branch.h"
 #include "pag_effect.h"
+#include "face_branch.h"
 #include "config.h"
 #include "log.h"
 #include <filesystem>
@@ -50,6 +51,7 @@ bool ControlChannel::start(const std::string& req_path,
                            const RtspServer* server,
                            Snapshot* snapshot,
                            PagBranch* pag_branch,
+                           FaceBranch* face_branch,
                            std::chrono::steady_clock::time_point start_time)
 {
     filter_ = filter;
@@ -57,6 +59,7 @@ bool ControlChannel::start(const std::string& req_path,
     server_ = server;
     snapshot_ = snapshot;
     pag_branch_ = pag_branch;
+    face_branch_ = face_branch;
     start_time_ = start_time;
 
     /* 1) 请求 FIFO（必须有 filter，否则 ShaderFilter 命令无意义；但不强求 server/cfg）。 */
@@ -201,6 +204,7 @@ void ControlChannel::stop()
     server_ = nullptr;
     snapshot_ = nullptr;
     pag_branch_ = nullptr;
+    face_branch_ = nullptr;
 }
 
 gboolean ControlChannel::on_readable(GIOChannel* src, GIOCondition cond, gpointer user)
@@ -308,6 +312,10 @@ void ControlChannel::handle_line(const std::string& line)
     else if (cmd == "pag")
     {
         reply = handle_pag(toks);
+    }
+    else if (cmd == "face")
+    {
+        reply = handle_face(toks);
     }
     else
     {
@@ -478,6 +486,15 @@ std::string ControlChannel::handle_status() const
         os << body;
     } else {
         os << "pag_enabled=false\n";
+    }
+
+    /* 7) face 副线（仅 face.enabled=true 时有实例）。 */
+    if (face_branch_) {
+        std::string body;
+        face_branch_->format_status(body);
+        os << body;
+    } else {
+        os << "face_enabled=false\n";
     }
 
     LOGI("control: status (uptime={}s, clients={})",
@@ -663,6 +680,73 @@ std::string ControlChannel::handle_pag(const std::vector<std::string>& toks)
         bool ok = eff->set_replace_image_every(every, err);
         return ok ? make_ok(line, "every=" + std::to_string(every))
                   : make_err(line, err.empty() ? "apply_failed" : err);
+    }
+
+    return make_err(line, "unknown_subcommand");
+}
+
+/* ─────────────────── face 命令族 ──────────────────
+ * 协议：
+ *   face on / face off              切 face_valve.drop = false/true
+ *   face status                     多行 key=value（attached/enabled/cascade/min_size/count/...）
+ *   face min-size <N>               热改 facedetect.min-size-width/height（自动 clamp）
+ * face_branch_ 为 nullptr（face.enabled=false 或编译开关 OFF）时统一返 face_disabled。 */
+std::string ControlChannel::handle_face(const std::vector<std::string>& toks)
+{
+    /* 还原命令行用于 reply 回显。 */
+    std::string line;
+    for (size_t i = 0; i < toks.size(); ++i)
+    {
+        if (i) line += ' ';
+        line += toks[i];
+    }
+
+    if (!face_branch_)
+    {
+        return make_err(line, "face_disabled");
+    }
+    if (toks.size() < 2)
+    {
+        return make_err(line, "missing_subcommand");
+    }
+
+    const std::string& sub = toks[1];
+
+    if (sub == "on" || sub == "off")
+    {
+        std::string err;
+        bool ok = face_branch_->set_enabled(sub == "on", &err);
+        return ok ? make_ok(line, std::string("face_enabled=") + (sub == "on" ? "true" : "false"))
+                  : make_err(line, err.empty() ? "apply_failed" : err);
+    }
+
+    if (sub == "status")
+    {
+        std::string body;
+        face_branch_->format_status(body);
+        return make_ok(line, body);
+    }
+
+    if (sub == "min-size")
+    {
+        if (toks.size() != 3)
+        {
+            return make_err(line, "usage_face_min_size");
+        }
+        int px;
+        try { px = std::stoi(toks[2]); }
+        catch (...) { return make_err(line, "invalid_value"); }
+        std::string err;
+        bool ok = face_branch_->set_min_size(px, &err);
+        /* set_min_size 在 clamp 时也会把 clamped_to_<N> 写入 err，但仍返回 true；
+         * 这种情况算 ok，把 clamp 信息透传给客户端。 */
+        if (ok)
+        {
+            std::string body = "min_size_px=" + std::to_string(px);
+            if (!err.empty()) body += "\nnote=" + err;
+            return make_ok(line, body);
+        }
+        return make_err(line, err.empty() ? "apply_failed" : err);
     }
 
     return make_err(line, "unknown_subcommand");

@@ -1,109 +1,110 @@
 # videorate
 
-> 项目内位置：`videoscale` 之后，把任意上游帧率重采样到固定的目标帧率。
+> 项目内位置：face 副线节流元素，把 30 fps 主线降采样到 5 fps 给 facedetect 用，避免重复同帧检测白白烧 CPU。
 
 ## 1. 基本信息
 
 | 项 | 值 |
 |---|---|
-| 分类 | **Filter / Converter（帧率）** |
-| 所在插件 | `gst-plugins-base`（`videorate`） |
+| 分类 | **Filter / Effect / Video（帧率适配）** |
+| 所在插件 | `gst-plugins-base`（`videoratecore`） |
 | 全名 | `Video rate adjuster` |
-| 工作方式 | **不做时间内插**，只丢帧或重复帧 |
+| 作用 | 通过丢帧 / 复制帧的方式，把上游帧率"对齐"到下游 caps 要求的固定 framerate |
 
-`videorate` 把上游不规则/不目标的帧率，**通过丢帧（drop）或重复帧（duplicate）**
-对齐到下游 caps 上的目标 framerate。它不会"合成"中间帧，无法做真正的运动平滑。
+`videorate` 不做插帧 / 重定时计算，只是一个时间轴对齐工具：
+
+- 上游帧率 > 下游目标 → **丢帧**；
+- 上游帧率 < 下游目标 → **复制最近一帧**直到对齐；
+- 上游帧率 = 下游目标 → 透传 + 仅修正 PTS 偏差。
+
+下游目标帧率通过紧跟其后的 capsfilter `video/x-raw,framerate=N/1` 协商得出，
+这是项目里 face 副线"5 fps 检测"的关键。
 
 ### Pad 端口能力
 
-- **sink / src**：`video/x-raw`（同格式同尺寸），caps 主要差异在 `framerate`。
+| Pad | 能力 | 备注 |
+|-----|------|------|
+| **sink** | `video/x-raw, framerate=[1/1, MAX]` 或 `image/jpeg` 等多媒体类型 | 支持的范围由编译时枚举决定 |
+| **src** | 与 sink 对偶 | 真正的 framerate 由下游 capsfilter 固定 |
 
 ### 关键属性
 
 | 属性 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `silent` | bool | `true` | 关闭后会发统计信息 |
-| `drop-only` | bool | `false` | 只允许丢帧，不允许复制（保 PTS 精度） |
-| `max-rate` | int | -1 | 输出最大帧率（FPS 上限） |
-| `skip-to-first` | bool | `false` | 起始时间不固定从 0，跳到第一个 buffer |
-| `average-period` | uint64 | 0 | 0 = 即时；>0 时按时间窗平均率 |
-| `drop-duplicate-frames` | bool | `false` | 上游送来重复帧时丢弃（与 imagefreeze 配合） |
-| `in` / `out` / `dup` / `drop` | uint64 | 只读统计 |
+| `silent` | bool | true | false 时打印每帧丢/复制日志（调试用） |
+| `drop-only` | bool | false | 仅丢帧不复制；上游慢时下游产帧也会变慢 |
+| `average-period` | uint64 | 0 | 平滑统计窗口；0 表示不平滑 |
+| `max-rate` | int | -1 | 限制 src 端最大帧率；与 capsfilter 等价但更显式 |
+| `skip-to-first` | bool | false | 起始时跳到首个 buffer 的 PTS（默认从 0） |
 
 ### 使用举例
 
 ```bash
-# 把任意帧率的源转成 30fps
-gst-launch-1.0 v4l2src ! videoconvert ! videorate \
-  ! video/x-raw,framerate=30/1 ! autovideosink
-
-# 上游 60fps 强制限到 15fps（drop-only 保证不重复）
-gst-launch-1.0 ... ! videorate drop-only=true max-rate=15 ! ...
+# 把 30 fps 摄像头降到 5 fps
+gst-launch-1.0 v4l2src ! videoconvert \
+  ! videorate ! video/x-raw,framerate=5/1 \
+  ! autovideosink
 ```
 
 ### 项目内用法
 
+face 副线（30 fps → 5 fps）：
+
 ```text
-... ! videoconvert ! videoscale ! videorate
-    ! video/x-raw,format=I420,width=1280,height=720,framerate=30/1 ! ...
+queue (leaky=downstream) ! valve(face_valve)
+   ! videorate ! video/x-raw,framerate=5/1
+   ! videoconvert ! video/x-raw,format=RGB
+   ! facedetect ...
 ```
 
-`v4l2src` 实测以 60fps 出 MJPEG，下游编码 / 推流都要 30fps，
-`videorate` 把 60 对齐到 30（每两帧丢一帧）。
+代码位置：[`pipeline_builder.cpp::append_branch_face`](../../src/pipeline/pipeline_builder.cpp)。
 
 ## 2. 内部工作原理与数据流程
 
 ```mermaid
 flowchart LR
-    A[Buffer<br/>PTS=t_in, 1/N0 间隔] --> B[与目标网格 1/N1 对齐]
-    B --> C{当前目标格<br/>已有帧?}
-    C -- 没有 --> D[push 当前帧<br/>改写 PTS=t_grid]
-    C -- 已有更近的下一帧 --> E[drop 当前帧]
-    C -- 当前格无新帧但<br/>下一格未到 --> F[duplicate<br/>push 上一帧]
-    D --> G[downstream]
-    E --> G
-    F --> G
+    A[upstream<br/>buffer @ PTS_in] --> B{PTS_in close to<br/>next out slot?}
+    B -- 是 --> C[push out @ PTS_out]
+    B -- 上游过快 --> X((丢弃))
+    B -- 上游过慢 --> D[duplicate last<br/>buffer @ PTS_out]
+
+    style X fill:#fdd,stroke:#c33
 ```
 
-核心思想：
+执行步骤：
 
-1. **目标时间网格**：根据 src caps 上 `framerate=N1/D1` 算出每帧目标 PTS：
-   `t_k = k * D1/N1` 秒。
-2. **决策**：每来一个 input buffer，比较它的 PTS 与当前网格点 / 下一网格点：
-   - 如果它比上一帧更接近当前格 → 用它替换上一帧候选；
-   - 如果下一格点已到、当前格还没出帧 → 把"最佳候选"输出；
-   - 如果上游慢（下一格还没新帧）→ 输出上一帧的拷贝（duplicate）。
-3. **PTS 重写**：输出帧的 PTS/DURATION 严格对齐网格点。
-4. **不做插值**：`videorate` **永远不会**生成"两帧之间的中间帧"，无运动平滑能力。
-   想要插帧得用 GPU 上的 `vapostproc` / `nvvidconv` / 自实现。
+1. `videorate` 内部维护"下一个输出时间点 next_t"，间隔为 `1 / 下游 framerate`。
+2. 每来一个 upstream buffer：
+   - 若 `PTS_in` 跟 `next_t` 最近 → push 出去（PTS 改写为 `next_t`），更新 next_t。
+   - 若 `PTS_in` 远早于 `next_t`（上游过快） → 丢弃。
+   - 若 `PTS_in` 远晚于 `next_t`（上游过慢） → 复制最近 buffer 填补，直到追上。
+3. EOS 时 push 一次最后缓存的 buffer 后转发 EOS。
 
 ## 3. 性能开销与其他补充
 
 ### 性能特征
 
-- **CPU 开销几乎为 0**：只比较 PTS、ref/unref buffer，不动像素数据。
-- **内存**：内部缓存最多 2 个 buffer（"上一帧 + 当前帧"做选择），常驻可忽略。
-- **延迟**：最多 1 帧延迟（要等到下一帧来才能确定上一帧是否输出）。
+- **CPU 开销 ≈ 0**：纯指针 + 计数；无像素级处理。
+- **内存**：仅缓存一个上游 buffer 用于复制；微不足道。
+- **延迟**：理论上引入 ≤ 1 帧延迟（要等下一个时间点）。
 
-### 为什么 60→30 选 `videorate` 而不是 caps 直接谈？
+### 与"在源端直接限速"的对比
 
-- 上游 `v4l2src` 协商时已经按设备能力定下 `60/1`，下游 `x264enc` 又要 `30/1`，
-  caps 两边谈不拢。中间的 `videorate` 起到"翻译器"作用。
-- 让 `v4l2src` 直接出 30fps 也行，但很多 USB 摄像头只在最高分辨率下支持高帧率，
-  低帧率下抖动反而更严重。项目策略是"按设备最强能力采，软件降到目标帧率"。
+| 方案 | 优点 | 缺点 |
+|---|---|---|
+| `v4l2src ! framerate=5/1` capsfilter | 摄像头硬件直接限速，零拷贝 | 摄像头不一定支持任意分母 |
+| `tee + videorate`（本项目） | 主线仍跑 30 fps 推流，副线独立节流 | 多一次时间轴对齐 |
+
+主线 RTSP 必须 30 fps（用户视觉流畅度），副线 5 fps（OpenCV 检测频率），
+所以项目里**只能选 tee + videorate 方案**——主线副线分别取自己想要的帧率。
 
 ### 常见坑
 
-1. **不写明确 `framerate`**：下游 caps 写 `framerate=[ 0/1, 60/1 ]` 这种范围，
-   `videorate` 不会做任何对齐，等于白接。**项目里写死 `30/1`** 才生效。
-2. **PTS 不连续 / 倒退**：上游 `do-timestamp=false` 让 PTS 来自不可靠时钟，
-   `videorate` 可能持续 drop 全部帧。项目里强制 `do-timestamp=true`。
-3. **30→60 复制帧**：码流里会出现连续两帧完全相同，下游 `x264enc` 会编出
-   超低 cost 的 P 帧（几乎 0 字节），看似"省码率"实则浪费 GOP 结构。
-4. **`drop-only=true` + 上游慢**：上游 fps < 目标时不会复制帧，会输出**比目标更慢**
-   的流，下游 `videorate` 之后的帧率不是 caps 写的那个。注意只在"上游一定 ≥ 目标"时用。
-
-### 与 GOP 配合
-
-`x264enc` 的 `key-int-max` 单位是"帧"，目标 fps=30 + key-int-max=30 = 1s 一个 IDR。
-`videorate` 必须把帧率稳稳钉在 30，否则 IDR 间隔会随上游波动。
+1. **drop-only 用错**：副线慢消费时如果设了 drop-only，整段副线就废了。
+   本项目让 videorate 默认（丢 + 复制），与 valve / queue leaky 协同保护主线。
+2. **上游 framerate 是变量（VFR）**：摄像头偶尔抖动到 28 fps，
+   videorate 会自动均摊到 5 fps；不要手动写 `caps,framerate=30/1` 硬约束上游。
+3. **跟 valve 顺序**：`valve ! videorate` 比 `videorate ! valve` 更省 CPU
+   ——valve 先丢弃 buffer，videorate 不用做任何事。本项目按这个顺序拼。
+4. **0 fps 的特殊语义**：cfg `face.rate.fps_limit=0` 时项目逻辑是"不限速"，
+   PipelineBuilder 直接不插入 videorate；不是把 0 当 caps 写进去。

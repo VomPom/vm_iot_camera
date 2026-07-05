@@ -240,6 +240,40 @@ input::placeholder { color: var(--muted); }
   width: 100%; height: 100%; object-fit: contain; background: #000;
   display: block;
 }
+/* face 检测框叠加层：完全铺满视频舞台，指针穿透，
+ * 不影响下方 <video> 的原生控件与选中态。canvas 内部尺寸由 JS 按 devicePixelRatio
+ * 校准，以避免 HiDPI 屏上线条模糊。 */
+.face-overlay {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  pointer-events: none;
+  display: block;
+}
+.face-overlay.hidden { display: none; }
+
+/* panel-head 右侧工具组：把 face box toggle 与 mode seg 并排放在同一水平线上，
+ * 保持视觉焦点集中在视频面板 head 内部，不再另开一行。 */
+.panel-head-tools {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  user-select: none;
+}
+.toggle input[type="checkbox"] {
+  width: 14px; height: 14px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.toggle:hover { color: var(--fg); }
 .video-overlay {
   position: absolute; inset: 0;
   display: flex; align-items: center; justify-content: center;

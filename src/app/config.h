@@ -109,10 +109,15 @@ struct FilterConfig {
 
 /* 控制通道（命令 FIFO）独立于 filter，承载所有运行时指令：
  *   filter / reload / status / snapshot ...
- * 与 filter 解耦后，filter.enabled=false 也能照常使用 status / snapshot。 */
+ * 与 filter 解耦后，filter.enabled=false 也能照常使用 status / snapshot。
+ *
+ * 事件 FIFO（event_fifo）与命令通道解耦，仅由 daemon 单向写入（行分隔的
+ * NDJSON），web 前端侧吧作为只读孢听器，目前用于人脸坐标实时广播。
+ * 空串=不开启。具体协议见 docs/control/event_fifo.md。 */
 struct ControlConfig {
     std::string request_fifo;  // 请求 FIFO 路径，空串=不开启控制通道
     std::string reply_fifo;    // 应答 FIFO 路径，空串=不写回执
+    std::string event_fifo;    // 事件广播 FIFO 路径，空串=不推送事件
 };
 
 /* 截图副线（snapshot branch）配置。 */
@@ -124,6 +129,58 @@ struct SnapshotConfig {
 
 /* 录像副线（record branch）配置。*/
 
+/* ───────────────────────── Face（人脸检测副线）───────────────────────── *
+ *   通过 gst-plugins-bad 中 opencv 子模块提供的 `facedetect` element 实现，
+ *   挂在 raw 锚点 `tee name=t` 的下游副线，主线 RTSP 编码零侵入。
+ *
+ *   形态：
+ *     enabled=true 时在副线插入：
+ *       tee=t. ! queue ! valve(face_valve) ! videorate ! videoconvert(RGB)
+ *              ! facedetect(name=face0, display=false) ! fakesink(face_appsink)
+ *     检测结果不走 buffer payload，而是通过 pipeline bus 投 element message
+ *     `Element/facedetect`，由 FaceBranch 注册的 bus watch 解析坐标。
+ *
+ *   兼容性：
+ *     默认 enabled=false，旧 yaml 不写 face: 时 launch 字符串与改造前 100% 一致。
+ *
+ *   前端画框：坐标通过 events FIFO 广播给 web 层，前端在 <video> 上叠
+ *   canvas 实时绘制矩形，管道内不再做 JPEG 预览副线。
+ *
+ *   详细方案见 docs/task/face.md。 */
+struct FaceDetectConfig {
+    /* OpenCV haarcascade xml 路径；apt 包 libopencv-data 默认安装到 /usr/share/opencv4/haarcascades。
+     * 启动期由 face_prober 做 stat 强检查，不存在则人类可读错误 + 退出码 5。 */
+    std::string cascade = "/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml";
+
+    /* 可选辅助级联：profile=侧脸；nose/mouth/eyes=部位级联；为空字符串时不注入对应属性。 */
+    std::string profile;
+    std::string nose;
+    std::string mouth;
+    std::string eyes;
+
+    int   min_size_px    = 80;     // 检测最小边长（像素），允许 [24, 1024]
+    float scale_factor   = 1.25f;  // Haar 多尺度搜索步长，允许 [1.05, 2.0]
+    int   min_neighbors  = 1;      // 投票阈值，越大越严，允许 [1, 10]
+    bool  detect_per_frame = true;  // true=每帧都检；false=配合 rate.fps_limit 降采样
+};
+
+struct FaceRateConfig {
+    int fps_limit = 5;             // 副线检测节流帧率；0 表示不限速；允许 [0, 30]
+};
+
+struct FaceControlConfig {
+    bool enabled_at_start = true;  // 启动期是否打开 face_valve（false=不检直到运行期 face on）
+    bool emit_when_empty  = false; // count=0 时是否也上报事件（默认仅有人时上报）
+    int  cooldown_ms      = 200;   // 同一帧/连续帧的事件聚合节流；允许 [0, 5000]
+};
+
+struct FaceConfig {
+    bool                  enabled = false;   // 总开关；false 时 pipeline 不插入任何 face 段
+    FaceDetectConfig      detect;
+    FaceRateConfig        rate;
+    FaceControlConfig     control;
+};
+
 struct Config {
     ServerConfig   server;
     CaptureConfig  capture;
@@ -132,6 +189,7 @@ struct Config {
     FilterConfig   filter;
     ControlConfig  control;
     SnapshotConfig snapshot;
+    FaceConfig     face;
     // TODO(record): 重开录像时恢复  RecordConfig record;
 
     std::string config_dir;

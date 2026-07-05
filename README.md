@@ -1,16 +1,18 @@
-# vm_iot
+# vm_iot_camera
 
 **English** · [简体中文](README.zh.md)
 
 A small RTSP camera daemon. It reads frames from a V4L2 device, runs an
-optional GLSL post-process filter, encodes the result with a software
-H.264 / H.265 backend, and serves the stream through `gst-rtsp-server`.
+optional GLSL post-process and libpag effect overlay, encodes the result
+with a software H.264 / H.265 backend, and serves the stream through
+`gst-rtsp-server`. A companion web console gives you visual control over
+the daemon, and a second binary `vm_iot_ctl` talks to the running daemon
+over a pair of FIFOs so you can switch effects, take snapshots, query
+status and more — all without restarting the stream.
 
 It is meant for Linux IoT and edge boxes where you want one
 config-driven binary instead of a hand-maintained `gst-launch` shell
-script. A second binary, `vm_iot_ctl`, talks to the running daemon over
-a pair of FIFOs to switch effects, take snapshots, or query status
-without restarting the stream.
+script.
 
 The project is developed and validated on a **Raspberry Pi 5 (8 GB)**
 running **Ubuntu 24.04**, with a USB UVC webcam plugged into the front
@@ -25,10 +27,9 @@ this single box.
 
 ## Demo
 
-A companion web console (served separately) drives `vm_iot_ctl` and
-embeds the live RTSP stream so you can switch shaders, toggle the PAG
-sticker, take snapshots, and inspect status from a browser — including
-on a phone over LAN.
+The screenshots and screen recordings below are captured from a live
+run, covering the desktop / mobile web console, live stream playback,
+console interaction and face-detection overlay.
 
 <table>
   <tr>
@@ -57,6 +58,15 @@ on a phone over LAN.
       <sub>Click the GIF to open the full-quality MP4.</sub>
     </td>
   </tr>
+  <tr>
+    <td align="center" colspan="2">
+      <b>Face detection demo</b><br/>
+      <a href=".imgs/face.mp4" title="Click to play face.mp4">
+        <img src=".imgs/face.gif" alt="Real-time face detection overlay (click for MP4)" width="60%"/>
+      </a><br/>
+      <sub>Real-time face detection with bounding-box overlay. Click the GIF for full-quality MP4.</sub>
+    </td>
+  </tr>
 </table>
 
 ---
@@ -81,6 +91,13 @@ on a phone over LAN.
   include `filter`, `reload`, `status`, `snapshot`.
 - **Snapshot.** A `tee` + `valve` branch sits next to the encoder; the
   `snapshot` command opens the valve for one frame and writes a JPEG.
+- **Face detection side branch.** A raw-anchor branch runs OpenCV Haar
+  `facedetect` (from `gst-plugins-bad`, `opencv` submodule) at a
+  throttled rate (default 5 fps). The main RTSP line is untouched
+  (`display=false`, zero pixel writes); rectangles are posted on the
+  pipeline bus, forwarded to an events FIFO as NDJSON, streamed to the
+  browser over WebSocket, and drawn as a canvas overlay on top of the
+  `<video>` element. Toggle at runtime with `vm_iot_ctl face on/off`.
 - **One shared pipeline for all RTSP clients**
   (`gst_rtsp_media_factory_set_shared(TRUE)`), so CPU does not grow
   with the viewer count.
@@ -256,6 +273,19 @@ side branch is allowed to attach to.
                                                        │           └─► videoconvert ─► jpegenc
                                                        │               └─► multifilesink(snap_sink, post-messages=true)
                                                        │
+                                                       ├──► [branch:face]         # cfg.face.enabled=true
+                                                       │     queue (leaky=downstream, max-buffers=2, silent=true)
+                                                       │       └─► valve(face_valve, drop=<!enabled_at_start>)
+                                                       │           └─► videorate ─► video/x-raw,framerate=<fps_limit>/1
+                                                       │               └─► videoconvert ─► video/x-raw,format=RGB
+                                                       │                   └─► facedetect(name=face0, display=false,
+                                                       │                                  profile=<cascade>, min-size-*=<min_size_px>,
+                                                       │                                  scale-factor=<scale_factor>,
+                                                       │                                  min-neighbors=<min_neighbors>)
+                                                       │                       └─► fakesink(face_appsink, async=false, sync=false, silent=true)
+                                                       │                       # rectangles reported via GST_MESSAGE_ELEMENT('facedetect')
+                                                       │                       # → FaceBranch → events FIFO (NDJSON kind:"faces") → web canvas overlay
+                                                       │
                                                        └──► (main encode segment)
                                                              queue (leaky=downstream, max-buffers=2)
                                                                └─► videoconvert ─► video/x-raw,format=I420
@@ -295,8 +325,8 @@ Full list of branches (planned and live):
 |------------|----------|------------------|------------|--------------------------|
 | main(rtp)  | enc_t.   | rtph26Xpay       | live       | leaky=downstream(2)      |
 | snapshot   | t.       | jpegenc + file   | live       | leaky=downstream(2)      |
+| face       | t.       | facedetect + fakesink (bus msg → events FIFO) | live | leaky=downstream(2) |
 | record     | enc_t.   | mp4mux + file    | planned    | non-leaky, large buffer  |
-| detect     | t.       | appsink          | planned    | leaky=downstream(2)      |
 | motion     | t.       | msg / event      | planned    | leaky=downstream(2)      |
 
 A per-element reference for everything that appears in the diagram
@@ -355,7 +385,43 @@ libstdc++.
 
 # Send a raw protocol line (for debugging)
 ./build/vm_iot_ctl raw "filter set 1"
+
+# Face detection side branch (drives face_valve without restarting the pipeline)
+./build/vm_iot_ctl face on           # open  face_valve → detection runs
+./build/vm_iot_ctl face off          # close face_valve → detection paused
+./build/vm_iot_ctl face get          # query current state (on / off)
 ```
+
+### Face detection
+
+When `face.enabled: true` (the default in `assets/config/default.yaml`),
+the daemon builds an extra branch off the raw anchor `tee name=t` that
+runs OpenCV Haar `facedetect`. Rectangles are posted via GStreamer bus
+messages, aggregated by `FaceBranch` (top-N=8 by area, with a
+`cooldown_ms` throttle), and pushed as a `kind:"faces"` NDJSON line
+through the events FIFO. The web console subscribes over
+`/ws/events` and draws the boxes as a canvas overlay on top of the
+live `<video>` — the RTSP line itself never carries the boxes
+(`display=false`), so recorded / re-encoded output stays clean.
+
+Relevant config knobs live under `face.*` in
+[assets/config/default.yaml](assets/config/default.yaml):
+
+| key | meaning |
+|---|---|
+| `face.enabled` | Master switch. `false` = branch not built at all. |
+| `face.detect.cascade` | Path to the Haar XML (usually `haarcascade_frontalface_default.xml`). |
+| `face.detect.min_size_px` | Minimum face box side; larger = faster + fewer false positives. |
+| `face.detect.scale_factor` / `min_neighbors` | Standard OpenCV multi-scale + voting knobs. |
+| `face.rate.fps_limit` | Detection fps (`videorate` throttle). Default 5, keep it low. |
+| `face.control.enabled_at_start` | Whether `face_valve` opens at startup or waits for `face on`. |
+| `face.control.emit_when_empty` | Emit `count=0` events too (useful during bring-up). |
+| `face.control.cooldown_ms` | Aggregation window that prevents bus-message storms. |
+
+Events FIFO payload format is documented in
+[docs/control/event_fifo.md](docs/control/event_fifo.md); the element
+itself is documented in
+[docs/gstreamer/facedetect.md](docs/gstreamer/facedetect.md).
 
 ### PAG overlay control
 
@@ -433,51 +499,3 @@ picks it up automatically.
   when you want to debug capture or encoding outside the daemon.
 - `scripts/bench/` — encoder benchmarks (for example
   `h265_compare.sh`).
-
----
-
-## GStreamer element notes
-
-`docs/gstreamer/` holds a one-page reference for every element used in
-the pipeline (`v4l2src`, `videoconvert`, `glshader`, `x264enc`,
-`rtph264pay`, ...). Start at
-[docs/gstreamer/README.md](docs/gstreamer/README.md). Whenever a new
-element is introduced into the pipeline, a matching `<element>.md` is
-added there.
-
----
-
-## Troubleshooting
-
-- `load config failed: bad file: assets/config/default.yaml` — run the
-  binary from a directory that contains `assets/`, or pass an explicit
-  path with `-c`. After a normal `cmake --build`, running from `build/`
-  works because of the symlink.
-- `gst_rtsp_server_attach failed (port 8554 in use?)` — another process
-  is bound to the same port; change `server.port` or pass `--port`.
-- Black screen or no video on the client — check that the camera
-  actually supports the requested `width / height / framerate / pixfmt`
-  combination. Run `./build/probe_dev /dev/video0` or
-  `v4l2-ctl --list-formats-ext -d /dev/video0`.
-- `unknown encoder backend: ...` — `encoder.backend` must be one of
-  `x264 | openh264 | x265`.
-- HEVC client cannot play the stream — when `backend: x265`, the server
-  emits an H.265 RTP stream (`rtph265pay`). Make sure the player
-  supports HEVC. Recent VLC and `ffplay` work; many browsers and mobile
-  players do not.
-- `vm_iot_ctl` exits with code `10` — the request or reply FIFO does
-  not exist. Check that the daemon is running and that
-  `control.request_fifo` / `control.reply_fifo` in the YAML match the
-  paths `vm_iot_ctl` is looking at (`--ctl` / `--reply` or `IOTCAM_CTL`
-  / `IOTCAM_REPLY`).
-- `vm_iot_ctl` exits with code `11` — another `vm_iot_ctl` is holding
-  the reply-FIFO lock. Wait or pass `--no-lock` if you understand the
-  trade-off (you may read another instance's reply).
-- `vm_iot_ctl` exits with code `124` — the daemon did not answer in
-  time. Increase `--timeout` or check the daemon logs.
-
----
-
-## License
-
-TBD.

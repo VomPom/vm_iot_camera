@@ -41,6 +41,7 @@ target_include_directories(vm_iot
         src/branches
         src/branches/snapshot
         src/branches/pag
+        src/branches/face
         src/control
         src/rtsp
         src/util
@@ -50,6 +51,23 @@ target_include_directories(vm_iot
 
 target_link_libraries(vm_iot PUBLIC
         PkgConfig::GST yaml-cpp spdlog::spdlog Threads::Threads)
+
+# ---- 人脸检测副线（face branch）----
+# 通过 GStreamer Bad Plugins 中 opencv 子模块提供的 facedetect element 接入；
+# 编译期只引入开关宏，OpenCV 相关链接全部由 plugin 在运行时承担，
+# 本工程**不直接依赖** OpenCV 头/库。
+#
+# 运行依赖：
+#   sudo apt install gstreamer1.0-opencv libopencv-data
+#
+# 关闭路径：-DVM_IOT_ENABLE_FACEDETECT=OFF；source 经 #if 包裹后退化与改造前一致。
+option(VM_IOT_ENABLE_FACEDETECT "Enable face detect branch via gst-opencv" ON)
+message(STATUS "VM_IOT_ENABLE_FACEDETECT=${VM_IOT_ENABLE_FACEDETECT}")
+if (VM_IOT_ENABLE_FACEDETECT)
+    target_compile_definitions(vm_iot PRIVATE VM_IOT_ENABLE_FACEDETECT=1)
+else ()
+    target_compile_definitions(vm_iot PRIVATE VM_IOT_ENABLE_FACEDETECT=0)
+endif ()
 
 # ---- libpag ----
 # 目标平台只考虑树莓派 aarch64 Debian/Raspbian。其他平台请自行扩展。

@@ -68,6 +68,10 @@ foreach (test_src IN LISTS VM_IOT_TEST_FILES)
     # 真集成分支（VM_IOT_ENABLE_LIBPAG=ON）由主可执行文件 vm_iot 独立验证。
     target_compile_definitions(${test_name} PRIVATE VM_IOT_ENABLE_LIBPAG=0)
 
+    # face 副线编译开关：单测固定走 ON 路径，覆盖 #if 包裹下的 face 分支。
+    # 副线启用本身仍由 yaml `face.enabled` 控制；测试用例里两路都覆盖到。
+    target_compile_definitions(${test_name} PRIVATE VM_IOT_ENABLE_FACEDETECT=1)
+
     # 自动发现并注册测试用例到 CTest
     gtest_discover_tests(${test_name})
 endforeach ()

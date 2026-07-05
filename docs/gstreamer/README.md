@@ -27,6 +27,13 @@
                                                        │           └─► videoconvert ─► jpegenc
                                                        │               └─► multifilesink(snap_sink, post-messages=true)
                                                        │
+                                                       ├──► [branch:face]   ✅ 可选（cfg.face.enabled=true 时接入）
+                                                       │     queue (leaky=downstream, max-buffers=2, silent=true)
+                                                       │       └─► valve(face_valve)
+                                                       │           └─► videorate ─► videoconvert(RGB)
+                                                       │               └─► facedetect(name=face0, display=false)
+                                                       │                   └─► fakesink(face_appsink)        # 检测结果走 pipeline bus
+                                                       │
                                                        └──► (主线编码段)
                                                              queue (leaky=downstream, max-buffers=2)
                                                                └─► videoconvert ─► video/x-raw,format=I420
@@ -57,12 +64,12 @@
 
 码流锥点还计划了两条未启用的副线（代码里只预留插槽）：
 
-| 副线       | 锥点    | 落点            | 状态与 queue 策略                       |
+| 副线       | 锚点    | 落点            | 状态与 queue 策略                       |
 |------------|---------|-----------------|---------------------------------------|
 | main(rtp)  | enc_t.  | rtph26Xpay      | 已实现 / leaky=downstream(2)             |
 | snapshot   | t.      | jpegenc + file  | 已实现 / leaky=downstream(2)             |
+| face       | t.      | facedetect + fakesink | 已实现 / leaky=downstream(2)；cfg.face.enabled=true |
 | record     | enc_t.  | mp4mux + file   | 规划中 / 预计 no-leaky 大缓冲          |
-| detect     | t.      | appsink         | 规划中 / leaky=downstream(2)             |
 | motion     | t.      | msg / event     | 规划中 / leaky=downstream(2)             |
 
 ## 分类目录
@@ -90,18 +97,24 @@
 - [tee](./tee.md) —— 单输入多分支零拷贝复制
 - [queue](./queue.md) —— 缓冲与解耦线程边界
 - [valve](./valve.md) —— 数据闸阀（按需开闭）
-- [identity](./identity.md) —— 透传占位元素（项目录像副线锚点 `rec_tail`）
+- [identity](./identity.md) —— 透传占位元素（项目录像副线锰点 `rec_tail`）
 - [pagfilter](./pagfilter.md) —— 自研滤镜（libpag 渲染 + 文本/视频图层 PLAYING 热替换）
 
-### 6. Encoder（编码器）
+### 6. Computer Vision（计算机视觉）
+- [facedetect](./facedetect.md) —— OpenCV Haar 人脸检测（gst-plugins-bad opencv）
+- [videorate](./videorate.md) —— 视频帧率适配器（face 副线把 30 fps 降到 5 fps）
+
+### 7. Encoder（编码器）
 - [x264enc](./x264enc.md) —— H.264 软编（libx264）
 - [jpegenc](./jpegenc.md) —— 单帧 JPEG 软编
 
-### 7. Payloader / Muxer / Sink（封装与落盘）
+### 8. Payloader / Muxer / Sink（封装与落盘）
 - [rtph264pay](./rtph264pay.md) —— H.264 → RTP 打包（RFC 6184）
 - [multifilesink](./multifilesink.md) —— 多文件序列输出
 - [mp4mux](./mp4mux.md) —— ISO BMFF / mp4 容器封装（项目录像副线核心，每段一个独立实例）
 - [filesink](./filesink.md) —— 单文件落盘（与 mp4mux 配对每段一个）
+- [fakesink](./fakesink.md) —— 数据黑洞 / 合规终点（face 副线终点 `face_appsink`：坐标走 pipeline bus，字节丢弃）
+- [appsink](./appsink.md) —— 应用层接收点（通用文档；本工程当前副线终点使用 `fakesink`：见 face 分支）
 
 ### 附：已不在主线使用
 - [splitmuxsink](./splitmuxsink.md) —— 容器边界自动切片。早期录像副线方案，

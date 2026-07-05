@@ -62,6 +62,9 @@
 //     reload                       重新读取 shader 文件并重新注入
 //     status                       打印运行状态（uptime / 客户端数 / 编码 / 滤镜 / 录像等）
 //     snapshot [PATH]              抓一张 jpeg 落盘
+//     face on / face off           打开 / 关闭人脸检测（控 face_valve.drop）
+//     face status                  打印人脸检测运行态（count / cascade / min_size_px ...）
+//     face min-size <N>            热改 facedetect.min-size-width/height（自动 clamp 到 [24,1024]）
 //   非法命令记 warning，不会让进程崩溃。
 //
 // ─────────────────────────── 回执协议 ───────────────────────────
@@ -91,6 +94,7 @@ class ShaderFilter;
 class RtspServer;
 class Snapshot;
 class PagBranch;
+class FaceBranch;
 struct Config;
 
 class ControlChannel {
@@ -110,6 +114,7 @@ public:
                const RtspServer*  server,
                Snapshot*          snapshot,
                PagBranch*         pag_branch,
+               FaceBranch*        face_branch,
                // TODO(record): 重开录像时在此恢复 Record* record 参数
                std::chrono::steady_clock::time_point start_time);
     void stop();
@@ -141,6 +146,10 @@ private:
      * effect 专属子命令 set-replace-image* 需 dynamic_cast<PagEffect*>。 */
     std::string handle_pag(const std::vector<std::string>& toks);
 
+    /* face 命令族（on / off / status / min-size）。
+     * face_branch_ 为 nullptr 时所有子命令统一返 face_disabled。 */
+    std::string handle_face(const std::vector<std::string>& toks);
+
     /* 工具：构造 "ok <line>\n<body>.\n" / "err <line> <reason>\n.\n"。 */
     static std::string make_ok(const std::string& cmd_line, const std::string& body);
     static std::string make_err(const std::string& cmd_line, const std::string& reason);
@@ -152,6 +161,7 @@ private:
     const RtspServer* server_ = nullptr;
     Snapshot*     snapshot_ = nullptr;
     PagBranch*    pag_branch_ = nullptr;
+    FaceBranch*   face_branch_ = nullptr;
     std::chrono::steady_clock::time_point start_time_{};
 
     GIOChannel*   channel_ = nullptr;

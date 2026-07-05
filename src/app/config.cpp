@@ -138,6 +138,7 @@ Config Config::from_file(const std::string& path) {
     if (auto ctl = n["control"]) {
         c.control.request_fifo = ctl["request_fifo"].as<std::string>(c.control.request_fifo);
         c.control.reply_fifo   = ctl["reply_fifo"  ].as<std::string>(c.control.reply_fifo);
+        c.control.event_fifo   = ctl["event_fifo"  ].as<std::string>(c.control.event_fifo);
     }
 
     if (auto s = n["snapshot"]) {
@@ -153,6 +154,52 @@ Config Config::from_file(const std::string& path) {
             spdlog::warn("snapshot.timeout_ms={} invalid, reset to 1500", c.snapshot.timeout_ms);
             c.snapshot.timeout_ms = 1500;
         }
+    }
+
+    /* face.*：人脸检测副线。默认 enabled=false同旧行为；
+     * 越界值 clamp + warn，cascade 路径合法性由 face_prober 在启动期做 stat 检查。 */
+    if (auto fc = n["face"]) {
+        c.face.enabled = fc["enabled"].as<bool>(c.face.enabled);
+
+        if (auto d = fc["detect"]) {
+            c.face.detect.cascade          = d["cascade"         ].as<std::string>(c.face.detect.cascade);
+            c.face.detect.profile          = d["profile"         ].as<std::string>(c.face.detect.profile);
+            c.face.detect.nose             = d["nose"            ].as<std::string>(c.face.detect.nose);
+            c.face.detect.mouth            = d["mouth"           ].as<std::string>(c.face.detect.mouth);
+            c.face.detect.eyes             = d["eyes"            ].as<std::string>(c.face.detect.eyes);
+            c.face.detect.min_size_px      = d["min_size_px"     ].as<int>        (c.face.detect.min_size_px);
+            c.face.detect.scale_factor     = d["scale_factor"    ].as<float>      (c.face.detect.scale_factor);
+            c.face.detect.min_neighbors    = d["min_neighbors"   ].as<int>        (c.face.detect.min_neighbors);
+            c.face.detect.detect_per_frame = d["detect_per_frame"].as<bool>       (c.face.detect.detect_per_frame);
+        }
+        if (auto r = fc["rate"]) {
+            c.face.rate.fps_limit = r["fps_limit"].as<int>(c.face.rate.fps_limit);
+        }
+        if (auto ctrl = fc["control"]) {
+            c.face.control.enabled_at_start = ctrl["enabled_at_start"].as<bool>(c.face.control.enabled_at_start);
+            c.face.control.emit_when_empty  = ctrl["emit_when_empty" ].as<bool>(c.face.control.emit_when_empty);
+            c.face.control.cooldown_ms      = ctrl["cooldown_ms"     ].as<int> (c.face.control.cooldown_ms);
+        }
+
+        /* clamp + warn：超出范围代表该参数付给 facedetect 后会被拒或陆除，
+         * 不如启动期就收敛到合理区间。 */
+        auto clamp_warn_int = [](int& v, int lo, int hi, const char* key) {
+            if (v < lo || v > hi) {
+                spdlog::warn("face.{}={} out of [{}, {}], clamped", key, v, lo, hi);
+                v = std::max(lo, std::min(hi, v));
+            }
+        };
+        auto clamp_warn_float = [](float& v, float lo, float hi, const char* key) {
+            if (!(v >= lo && v <= hi)) {
+                spdlog::warn("face.{}={} out of [{}, {}], clamped", key, v, lo, hi);
+                v = std::max(lo, std::min(hi, std::isnan(v) ? lo : v));
+            }
+        };
+        clamp_warn_int(c.face.detect.min_size_px,        24,    1024, "detect.min_size_px");
+        clamp_warn_float(c.face.detect.scale_factor,     1.05f, 2.0f, "detect.scale_factor");
+        clamp_warn_int(c.face.detect.min_neighbors,      1,     10,   "detect.min_neighbors");
+        clamp_warn_int(c.face.rate.fps_limit,            0,     30,   "rate.fps_limit");
+        clamp_warn_int(c.face.control.cooldown_ms,       0,     5000, "control.cooldown_ms");
     }
 
     // TODO(record): 录像功能暂未实现，YAML 中的 record 节点会被静默忽略。
@@ -230,13 +277,26 @@ const std::unordered_map<std::string, Setter>& setters() {
 
         {"control.request_fifo", [](Config& c, const std::string& v){ c.control.request_fifo = v; }},
         {"control.reply_fifo",   [](Config& c, const std::string& v){ c.control.reply_fifo   = v; }},
+        {"control.event_fifo",   [](Config& c, const std::string& v){ c.control.event_fifo   = v; }},
 
         {"snapshot.dir",         [](Config& c, const std::string& v){ c.snapshot.dir         = v; }},
         {"snapshot.quality",     [](Config& c, const std::string& v){ c.snapshot.quality     = parse_int(v, "snapshot.quality"); }},
         {"snapshot.timeout_ms",  [](Config& c, const std::string& v){ c.snapshot.timeout_ms  = parse_int(v, "snapshot.timeout_ms"); }},
 
-        // TODO(record): 录像功能暂未实现，原 record.enabled / dir / segment_sec / filename_pattern
-        //               setter 已从表中移除。未来重新接入时请同时恢复本表与 from_file 中的解析。
+        {"face.enabled",                       [](Config& c, const std::string& v){ c.face.enabled                       = parse_bool(v, "face.enabled"); }},
+        {"face.detect.cascade",                [](Config& c, const std::string& v){ c.face.detect.cascade                = v; }},
+        {"face.detect.profile",                [](Config& c, const std::string& v){ c.face.detect.profile                = v; }},
+        {"face.detect.nose",                   [](Config& c, const std::string& v){ c.face.detect.nose                   = v; }},
+        {"face.detect.mouth",                  [](Config& c, const std::string& v){ c.face.detect.mouth                  = v; }},
+        {"face.detect.eyes",                   [](Config& c, const std::string& v){ c.face.detect.eyes                   = v; }},
+        {"face.detect.min_size_px",            [](Config& c, const std::string& v){ c.face.detect.min_size_px            = parse_int(v, "face.detect.min_size_px"); }},
+        {"face.detect.scale_factor",           [](Config& c, const std::string& v){ c.face.detect.scale_factor           = parse_float(v, "face.detect.scale_factor"); }},
+        {"face.detect.min_neighbors",          [](Config& c, const std::string& v){ c.face.detect.min_neighbors          = parse_int(v, "face.detect.min_neighbors"); }},
+        {"face.detect.detect_per_frame",       [](Config& c, const std::string& v){ c.face.detect.detect_per_frame       = parse_bool(v, "face.detect.detect_per_frame"); }},
+        {"face.rate.fps_limit",                [](Config& c, const std::string& v){ c.face.rate.fps_limit                = parse_int(v, "face.rate.fps_limit"); }},
+        {"face.control.enabled_at_start",      [](Config& c, const std::string& v){ c.face.control.enabled_at_start      = parse_bool(v, "face.control.enabled_at_start"); }},
+        {"face.control.emit_when_empty",       [](Config& c, const std::string& v){ c.face.control.emit_when_empty       = parse_bool(v, "face.control.emit_when_empty"); }},
+        {"face.control.cooldown_ms",           [](Config& c, const std::string& v){ c.face.control.cooldown_ms           = parse_int(v, "face.control.cooldown_ms"); }},
     };
     return kMap;
 }

@@ -17,11 +17,15 @@
    │       ├─ POST /api/snapshot┤
    │       └─ ...               │
    │                            ▼
-   │                       FifoClient
-   │                     ┌──────────┐
+   │                       FifoClient           EventFifoReader
+   │                     ┌──────────┐        ┌──────────────┐
    │                     │ /tmp/vm_iot.ctl   ──► daemon
    │                     │ /tmp/vm_iot.reply ◄── daemon
-   │                     └──────────┘
+   │                     └──────────┘        │ /tmp/vm_iot.events ◀─ daemon
+   │                                              └──────────────┘
+   │                                                │  (人脸坐标 NDJSON)
+   │                                                ▼
+   │                                    /ws/events kind:'faces'
    │
    └── http://pi:8889/live/whep   ← WebRTC（mediamtx 进程）
        http://pi:8888/live/...    ← HLS 兜底
@@ -110,6 +114,7 @@ WorkingDirectory=/opt/vm_iot/web
 ExecStart=/usr/bin/node server.mjs
 Environment=IOTCAM_CTL=/tmp/vm_iot.ctl
 Environment=IOTCAM_REPLY=/tmp/vm_iot.reply
+Environment=IOTCAM_EVENTS=/tmp/vm_iot.events
 Environment=VM_IOT_WEB_HOST=0.0.0.0
 Environment=VM_IOT_WEB_PORT=8080
 Restart=on-failure
@@ -147,13 +152,14 @@ sudo systemctl status vm_iot_web
 ```
 web/
 ├── server.mjs          # Fastify 入口
-├── fifo.mjs            # FIFO 客户端（协议状态机 + 命令队列）
+├── fifo.mjs            # FIFO 客户端（控制通道：请求-应答状态机 + 命令队列）
+├── event_fifo.mjs      # EventFifoReader（单向事件广播，当前已接入人脸坐标）
 ├── routes.mjs          # REST + WS 路由 + 命令白名单
-├── package.json        # 三个依赖：fastify / @fastify/static / @fastify/websocket
+├── package.json        # 依赖：fastify / @fastify/static / @fastify/websocket
 ├── README.md           # 你正在读的这份
 └── static/
-    ├── index.html      # 单页骨架
-    ├── app.js          # 媒体接入 + 命令分发 + 状态推送
+    ├── index.html      # 单页骨架（含 <video> + face overlay canvas）
+    ├── app.js          # 媒体接入 + 命令分发 + 状态推送 + face 绘框
     └── style.css       # 工业控制台主题
 
 third_party/mediamtx/mediamtx.yml   # mediamtx 配置（仅 WebRTC + HLS）
