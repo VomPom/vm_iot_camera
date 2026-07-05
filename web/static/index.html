@@ -27,14 +27,21 @@
   <section class="panel video-panel">
     <div class="panel-head">
       <h2>live preview</h2>
-      <div class="seg" id="modeSeg">
-        <button data-mode="webrtc" class="on">WebRTC</button>
-        <button data-mode="hls">HLS</button>
-        <button data-mode="rtsp">RTSP url</button>
+      <div class="panel-head-tools">
+        <label class="toggle" title="toggle face box overlay">
+          <input type="checkbox" id="faceOverlayToggle" checked>
+          <span>face box</span>
+        </label>
+        <div class="seg" id="modeSeg">
+          <button data-mode="webrtc" class="on">WebRTC</button>
+          <button data-mode="hls">HLS</button>
+          <button data-mode="rtsp">RTSP url</button>
+        </div>
       </div>
     </div>
     <div class="video-stage">
       <video id="player" autoplay playsinline muted></video>
+      <canvas id="faceOverlay" class="face-overlay"></canvas>
       <div id="rtspBox" class="rtsp-box hidden">
         <p class="muted">your browser cannot play RTSP directly. use:</p>
         <code id="rtspUrl">rtsp://&lt;host&gt;:8554/live</code>

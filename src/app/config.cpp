@@ -138,6 +138,7 @@ Config Config::from_file(const std::string& path) {
     if (auto ctl = n["control"]) {
         c.control.request_fifo = ctl["request_fifo"].as<std::string>(c.control.request_fifo);
         c.control.reply_fifo   = ctl["reply_fifo"  ].as<std::string>(c.control.reply_fifo);
+        c.control.event_fifo   = ctl["event_fifo"  ].as<std::string>(c.control.event_fifo);
     }
 
     if (auto s = n["snapshot"]) {
@@ -174,11 +175,6 @@ Config Config::from_file(const std::string& path) {
         if (auto r = fc["rate"]) {
             c.face.rate.fps_limit = r["fps_limit"].as<int>(c.face.rate.fps_limit);
         }
-        if (auto pj = fc["preview_jpeg"]) {
-            c.face.preview_jpeg.enabled      = pj["enabled"     ].as<bool>(c.face.preview_jpeg.enabled);
-            c.face.preview_jpeg.jpeg_quality = pj["jpeg_quality"].as<int> (c.face.preview_jpeg.jpeg_quality);
-            c.face.preview_jpeg.fps_limit    = pj["fps_limit"   ].as<int> (c.face.preview_jpeg.fps_limit);
-        }
         if (auto ctrl = fc["control"]) {
             c.face.control.enabled_at_start = ctrl["enabled_at_start"].as<bool>(c.face.control.enabled_at_start);
             c.face.control.emit_when_empty  = ctrl["emit_when_empty" ].as<bool>(c.face.control.emit_when_empty);
@@ -203,8 +199,6 @@ Config Config::from_file(const std::string& path) {
         clamp_warn_float(c.face.detect.scale_factor,     1.05f, 2.0f, "detect.scale_factor");
         clamp_warn_int(c.face.detect.min_neighbors,      1,     10,   "detect.min_neighbors");
         clamp_warn_int(c.face.rate.fps_limit,            0,     30,   "rate.fps_limit");
-        clamp_warn_int(c.face.preview_jpeg.jpeg_quality, 1,     100,  "preview_jpeg.jpeg_quality");
-        clamp_warn_int(c.face.preview_jpeg.fps_limit,    0,     30,   "preview_jpeg.fps_limit");
         clamp_warn_int(c.face.control.cooldown_ms,       0,     5000, "control.cooldown_ms");
     }
 
@@ -283,6 +277,7 @@ const std::unordered_map<std::string, Setter>& setters() {
 
         {"control.request_fifo", [](Config& c, const std::string& v){ c.control.request_fifo = v; }},
         {"control.reply_fifo",   [](Config& c, const std::string& v){ c.control.reply_fifo   = v; }},
+        {"control.event_fifo",   [](Config& c, const std::string& v){ c.control.event_fifo   = v; }},
 
         {"snapshot.dir",         [](Config& c, const std::string& v){ c.snapshot.dir         = v; }},
         {"snapshot.quality",     [](Config& c, const std::string& v){ c.snapshot.quality     = parse_int(v, "snapshot.quality"); }},
@@ -299,15 +294,9 @@ const std::unordered_map<std::string, Setter>& setters() {
         {"face.detect.min_neighbors",          [](Config& c, const std::string& v){ c.face.detect.min_neighbors          = parse_int(v, "face.detect.min_neighbors"); }},
         {"face.detect.detect_per_frame",       [](Config& c, const std::string& v){ c.face.detect.detect_per_frame       = parse_bool(v, "face.detect.detect_per_frame"); }},
         {"face.rate.fps_limit",                [](Config& c, const std::string& v){ c.face.rate.fps_limit                = parse_int(v, "face.rate.fps_limit"); }},
-        {"face.preview_jpeg.enabled",          [](Config& c, const std::string& v){ c.face.preview_jpeg.enabled          = parse_bool(v, "face.preview_jpeg.enabled"); }},
-        {"face.preview_jpeg.jpeg_quality",     [](Config& c, const std::string& v){ c.face.preview_jpeg.jpeg_quality     = parse_int(v, "face.preview_jpeg.jpeg_quality"); }},
-        {"face.preview_jpeg.fps_limit",        [](Config& c, const std::string& v){ c.face.preview_jpeg.fps_limit        = parse_int(v, "face.preview_jpeg.fps_limit"); }},
         {"face.control.enabled_at_start",      [](Config& c, const std::string& v){ c.face.control.enabled_at_start      = parse_bool(v, "face.control.enabled_at_start"); }},
         {"face.control.emit_when_empty",       [](Config& c, const std::string& v){ c.face.control.emit_when_empty       = parse_bool(v, "face.control.emit_when_empty"); }},
         {"face.control.cooldown_ms",           [](Config& c, const std::string& v){ c.face.control.cooldown_ms           = parse_int(v, "face.control.cooldown_ms"); }},
-
-        // TODO(record): 录像功能暂未实现，原 record.enabled / dir / segment_sec / filename_pattern
-        //               setter 已从表中移除。未来重新接入时请同时恢复本表与 from_file 中的解析。
     };
     return kMap;
 }

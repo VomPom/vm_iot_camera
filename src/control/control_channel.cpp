@@ -685,13 +685,11 @@ std::string ControlChannel::handle_pag(const std::vector<std::string>& toks)
     return make_err(line, "unknown_subcommand");
 }
 
-/* ─────────────────── face 命令族 ────────────────────
+/* ─────────────────── face 命令族 ──────────────────
  * 协议：
  *   face on / face off              切 face_valve.drop = false/true
  *   face status                     多行 key=value（attached/enabled/cascade/min_size/count/...）
  *   face min-size <N>               热改 facedetect.min-size-width/height（自动 clamp）
- *   face preview on / face preview off
- *                                   切 face_prev_valve.drop；preview 段未挂时返 face_preview_disabled
  * face_branch_ 为 nullptr（face.enabled=false 或编译开关 OFF）时统一返 face_disabled。 */
 std::string ControlChannel::handle_face(const std::vector<std::string>& toks)
 {
@@ -749,18 +747,6 @@ std::string ControlChannel::handle_face(const std::vector<std::string>& toks)
             return make_ok(line, body);
         }
         return make_err(line, err.empty() ? "apply_failed" : err);
-    }
-
-    if (sub == "preview")
-    {
-        if (toks.size() != 3 || (toks[2] != "on" && toks[2] != "off"))
-        {
-            return make_err(line, "usage_face_preview");
-        }
-        std::string err;
-        bool ok = face_branch_->set_preview(toks[2] == "on", &err);
-        return ok ? make_ok(line, std::string("face_preview=") + (toks[2] == "on" ? "true" : "false"))
-                  : make_err(line, err.empty() ? "apply_failed" : err);
     }
 
     return make_err(line, "unknown_subcommand");

@@ -109,10 +109,15 @@ struct FilterConfig {
 
 /* 控制通道（命令 FIFO）独立于 filter，承载所有运行时指令：
  *   filter / reload / status / snapshot ...
- * 与 filter 解耦后，filter.enabled=false 也能照常使用 status / snapshot。 */
+ * 与 filter 解耦后，filter.enabled=false 也能照常使用 status / snapshot。
+ *
+ * 事件 FIFO（event_fifo）与命令通道解耦，仅由 daemon 单向写入（行分隔的
+ * NDJSON），web 前端侧吧作为只读孢听器，目前用于人脸坐标实时广播。
+ * 空串=不开启。具体协议见 docs/control/event_fifo.md。 */
 struct ControlConfig {
     std::string request_fifo;  // 请求 FIFO 路径，空串=不开启控制通道
     std::string reply_fifo;    // 应答 FIFO 路径，空串=不写回执
+    std::string event_fifo;    // 事件广播 FIFO 路径，空串=不推送事件
 };
 
 /* 截图副线（snapshot branch）配置。 */
@@ -124,24 +129,22 @@ struct SnapshotConfig {
 
 /* 录像副线（record branch）配置。*/
 
-/* ─────────────────────────── Face（人脸检测副线）─────────────────────────── *
+/* ───────────────────────── Face（人脸检测副线）───────────────────────── *
  *   通过 gst-plugins-bad 中 opencv 子模块提供的 `facedetect` element 实现，
  *   挂在 raw 锚点 `tee name=t` 的下游副线，主线 RTSP 编码零侵入。
  *
  *   形态：
  *     enabled=true 时在副线插入：
  *       tee=t. ! queue ! valve(face_valve) ! videorate ! videoconvert(RGB)
- *              ! facedetect(name=face0, display=false) ! appsink(face_appsink)
+ *              ! facedetect(name=face0, display=false) ! fakesink(face_appsink)
  *     检测结果不走 buffer payload，而是通过 pipeline bus 投 element message
  *     `Element/facedetect`，由 FaceBranch 注册的 bus watch 解析坐标。
  *
- *     enabled=true 且 preview_jpeg.enabled=true 时再额外挂一条画框 JPEG 预览副线：
- *       tee=t. ! queue ! videorate ! convert ! facedetect(display=true)
- *              ! convert ! jpegenc ! valve(face_prev_valve) ! appsink(face_jpeg_sink)
- *     默认 face_prev_valve=drop=true，仅在 ControlChannel 显式打开后才出 JPEG。
- *
  *   兼容性：
  *     默认 enabled=false，旧 yaml 不写 face: 时 launch 字符串与改造前 100% 一致。
+ *
+ *   前端画框：坐标通过 events FIFO 广播给 web 层，前端在 <video> 上叠
+ *   canvas 实时绘制矩形，管道内不再做 JPEG 预览副线。
  *
  *   详细方案见 docs/task/face.md。 */
 struct FaceDetectConfig {
@@ -165,12 +168,6 @@ struct FaceRateConfig {
     int fps_limit = 5;             // 副线检测节流帧率；0 表示不限速；允许 [0, 30]
 };
 
-struct FacePreviewJpegConfig {
-    bool enabled      = false;     // 是否额外挂一路画框 JPEG 预览副线
-    int  jpeg_quality = 70;        // 1~100
-    int  fps_limit    = 2;         // JPEG 预览输出 fps 上限；0 表示不限速；允许 [0, 30]
-};
-
 struct FaceControlConfig {
     bool enabled_at_start = true;  // 启动期是否打开 face_valve（false=不检直到运行期 face on）
     bool emit_when_empty  = false; // count=0 时是否也上报事件（默认仅有人时上报）
@@ -181,7 +178,6 @@ struct FaceConfig {
     bool                  enabled = false;   // 总开关；false 时 pipeline 不插入任何 face 段
     FaceDetectConfig      detect;
     FaceRateConfig        rate;
-    FacePreviewJpegConfig preview_jpeg;
     FaceControlConfig     control;
 };
 

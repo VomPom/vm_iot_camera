@@ -118,8 +118,6 @@ TEST(BuildFace, DisabledByDefault) {
     EXPECT_EQ(s.find("facedetect"),       std::string::npos) << s;
     EXPECT_EQ(s.find("face_valve"),       std::string::npos) << s;
     EXPECT_EQ(s.find("face_appsink"),     std::string::npos) << s;
-    EXPECT_EQ(s.find("face_prev_valve"),  std::string::npos) << s;
-    EXPECT_EQ(s.find("face_jpeg_sink"),   std::string::npos) << s;
 }
 
 TEST(BuildFace, EnabledMainBranch) {
@@ -128,24 +126,21 @@ TEST(BuildFace, EnabledMainBranch) {
     c.face.detect.cascade           = "/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml";
     c.face.detect.min_size_px       = 80;
     c.face.rate.fps_limit           = 5;
-    c.face.preview_jpeg.enabled     = false;
     c.face.control.enabled_at_start = true;
 
     auto s = PipelineBuilder::build(c);
 
     EXPECT_NE(s.find("facedetect name=face0"), std::string::npos) << s;
-    EXPECT_NE(s.find("appsink name=face_appsink"), std::string::npos) << s;
+    EXPECT_NE(s.find("fakesink name=face_appsink"), std::string::npos) << s;
     EXPECT_NE(s.find("valve name=face_valve drop=false"), std::string::npos) << s;
     EXPECT_NE(s.find("framerate=5/1"), std::string::npos) << s;
     EXPECT_NE(s.find("min-size-width=80"),  std::string::npos) << s;
     EXPECT_NE(s.find("min-size-height=80"), std::string::npos) << s;
     EXPECT_NE(s.find("video/x-raw,format=RGB"), std::string::npos) << s;
 
-    /* 主检测路径 display=false；preview 路径 display=true，本用例未启用，应不出现。 */
+    /* 主检测路径 display=false；现已无额外 preview 副线，display=true 应不出现。 */
     EXPECT_NE(s.find("display=false"), std::string::npos) << s;
     EXPECT_EQ(s.find("display=true"),  std::string::npos) << s;
-    EXPECT_EQ(s.find("face_prev_valve"), std::string::npos) << s;
-    EXPECT_EQ(s.find("face_jpeg_sink"),  std::string::npos) << s;
 }
 
 TEST(BuildFace, EnabledAtStartFalseSetsDropTrue) {
@@ -166,25 +161,6 @@ TEST(BuildFace, FpsLimitZeroNoVideorate) {
      * 注意主线编码段不会出现"framerate="字面（主线 caps 用 framerate=<int>/1
      * 也会写出来，所以这里改用 face 段的 RGB caps 后紧跟 facedetect 验证）。 */
     EXPECT_EQ(s.find("video/x-raw,framerate="), std::string::npos) << s;
-}
-
-TEST(BuildFace, PreviewBranchAttached) {
-    auto c = make_baseline_cfg();
-    c.face.enabled                = true;
-    c.face.preview_jpeg.enabled   = true;
-    c.face.preview_jpeg.jpeg_quality = 60;
-    c.face.preview_jpeg.fps_limit    = 2;
-
-    auto s = PipelineBuilder::build(c);
-
-    /* 主检测路径仍存在。 */
-    EXPECT_NE(s.find("facedetect name=face0"),     std::string::npos) << s;
-    /* preview 副线四件特征：display=true / jpegenc / face_prev_valve / face_jpeg_sink。 */
-    EXPECT_NE(s.find("display=true"),              std::string::npos) << s;
-    EXPECT_NE(s.find("jpegenc quality=60"),        std::string::npos) << s;
-    EXPECT_NE(s.find("valve name=face_prev_valve"),std::string::npos) << s;
-    EXPECT_NE(s.find("appsink name=face_jpeg_sink"),std::string::npos) << s;
-    EXPECT_NE(s.find("framerate=2/1"),             std::string::npos) << s;
 }
 
 TEST(BuildFace, OptionalCascadesOmittedWhenEmpty) {

@@ -26,10 +26,21 @@
 void FaceBranch::configure(const FaceConfig& cfg) {
     cfg_ = cfg;
     LOGI("face_branch: configured enabled={} cascade='{}' fps_limit={} "
-         "min_size_px={} cooldown_ms={} preview_jpeg={} emit_when_empty={}",
+         "min_size_px={} cooldown_ms={} emit_when_empty={}",
          cfg_.enabled, cfg_.detect.cascade, cfg_.rate.fps_limit,
          cfg_.detect.min_size_px, cfg_.control.cooldown_ms,
-         cfg_.preview_jpeg.enabled, cfg_.control.emit_when_empty);
+         cfg_.control.emit_when_empty);
+}
+
+void FaceBranch::set_on_faces_callback(OnFacesCallback cb) {
+    std::lock_guard<std::mutex> lk(mu_);
+    on_faces_cb_ = std::move(cb);
+}
+
+void FaceBranch::set_frame_size(int w, int h) {
+    std::lock_guard<std::mutex> lk(mu_);
+    frame_w_ = w;
+    frame_h_ = h;
 }
 
 bool FaceBranch::on_attached_locked() {
@@ -49,23 +60,13 @@ bool FaceBranch::on_attached_locked() {
         return false;
     }
 
-    /* preview 副线元素软抛拓（允许不存在）：仅当 launch 字符串中拼了
-     * preview 段时才能拿到。拿不到不算 attach 失败——一只把 set_preview
-     * 映射为 face_preview_disabled 错码即可。拿到时 gst_bin_get_by_name 已 +ref，
-     * detach 时对应 unref。 */
-    if (GstElement* pv = gst_bin_get_by_name(GST_BIN(pipeline), "face_prev_valve")) {
-        preview_valve_ = pv;   // 转移 ref
-    }
-
-    /* preview 元素若编译进 launch 但 enabled_at_start=false 时，主线 face_valve
-     * 已在 launch 字符串中按配置写好 drop=true/false；这里无需再 set 一遍。
-     * 保留 LOGI 把当前真实状态打印出来，便于排错。 */
+    /* enabled_at_start=false 时，face_valve.drop 已在 launch 字符串中按配置写好；
+     * 这里无需再 set 一遍。保留 LOGI 把当前真实状态打印出来，便于排错。 */
     GstElement* fv = element("face_valve");
     gboolean cur_drop = TRUE;
     if (fv) g_object_get(fv, "drop", &cur_drop, nullptr);
-    LOGI("face_branch: attached, face_valve.drop={} preview_available={}",
-         cur_drop ? "true" : "false",
-         preview_valve_ ? "true" : "false");
+    LOGI("face_branch: attached, face_valve.drop={}",
+         cur_drop ? "true" : "false");
     last_state_   = {};
     last_emit_ts_ = {};
     last_log_ts_  = {};
@@ -74,12 +75,7 @@ bool FaceBranch::on_attached_locked() {
 
 void FaceBranch::on_detaching_locked() {
     /* 本 branch 不再自己持有 bus 与 watch（sync handler 由 RtspServer
-     * 统一在 media-unprepared 时清除）；只需释放 preview 可选元素，
-     * required 元素 unref 由基类负责。 */
-    if (preview_valve_) {
-        gst_object_unref(preview_valve_);
-        preview_valve_ = nullptr;
-    }
+     * 统一在 media-unprepared 时清除）；required 元素 unref 由基类负责。 */
 }
 
 /* ─────────────────────── 控制 API ─────────────────────── */
@@ -117,23 +113,6 @@ bool FaceBranch::set_min_size(int px, std::string* err) {
     return true;
 }
 
-bool FaceBranch::set_preview(bool on, std::string* err) {
-    std::lock_guard<std::mutex> lk(mu_);
-    GstElement* pv = preview_valve_;
-    if (!pv) {
-        if (err) *err = "face_preview_disabled";
-        return false;
-    }
-    g_object_set(pv, "drop", on ? FALSE : TRUE, nullptr);
-    LOGI("face_branch: set_preview={}", on);
-    return true;
-}
-
-bool FaceBranch::preview_available() const {
-    std::lock_guard<std::mutex> lk(mu_);
-    return preview_valve_ != nullptr;
-}
-
 void FaceBranch::format_status(std::string& out) const {
     std::lock_guard<std::mutex> lk(mu_);
 
@@ -151,17 +130,6 @@ void FaceBranch::format_status(std::string& out) const {
     int min_w = cfg_.detect.min_size_px;
     if (fd) g_object_get(fd, "min-size-width", &min_w, nullptr);
     out.append("face_min_size_px=").append(std::to_string(min_w)).append("\n");
-
-    out.append("face_preview_enabled=");
-    GstElement* pv = preview_valve_;
-    if (pv) {
-        gboolean prev_drop = TRUE;
-        g_object_get(pv, "drop", &prev_drop, nullptr);
-        out.append(prev_drop ? "false" : "true");
-    } else {
-        out.append("false");
-    }
-    out.append("\n");
 
     out.append("face_count=").append(std::to_string(last_state_.count)).append("\n");
 
@@ -269,7 +237,7 @@ void FaceBranch::on_bus_message(GstMessage* msg) {
 
     auto now = std::chrono::steady_clock::now();
 
-    std::lock_guard<std::mutex> lk(mu_);
+    std::unique_lock<std::mutex> lk(mu_);
 
     /* cooldown_ms 节流：窗口内仅保留最新一条。 */
     if (last_emit_ts_.time_since_epoch().count() != 0 &&
@@ -292,6 +260,18 @@ void FaceBranch::on_bus_message(GstMessage* msg) {
         } else {
             LOGI("face_branch: detected count=0");
         }
+    }
+
+    /* 回调推送（events FIFO 等）：拷贝所需数据到栈上，释放 mu_ 后再同步调用，
+     * 避免回调内反手抓锁造成死锁。此时 last_state_ 已更新，拷贝过去即可。 */
+    OnFacesCallback cb_local = on_faces_cb_;
+    FaceEvent       ev_copy  = last_state_;
+    int             fw       = frame_w_;
+    int             fh       = frame_h_;
+    lk.unlock();
+
+    if (cb_local) {
+        cb_local(ev_copy, fw, fh);
     }
 }
 

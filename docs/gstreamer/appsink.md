@@ -1,8 +1,7 @@
 # appsink
 
-> 项目内位置：face 副线终结点，元素名 `face_appsink`（主检测）/ `face_jpeg_sink`（画框预览）。
-> 目前以"流终结点 + 不消费"模式使用，主要为 facedetect 的 bus message 提供数据驱动；
-> 未来 HTTP `/face/preview.jpg` 接入时再切换到 `emit-signals=true` 路径。
+> 项目内位置：本项目当前副线终点一律使用 `fakesink`（见 face 分支），未实际使用 `appsink`。
+> 本文件保留为通用参考档案，以备后续需要 buffer 回调（例如应用层 ROI 算法 / HTTP 预览端点）时参考。
 
 ## 1. 基本信息
 
@@ -19,15 +18,16 @@
 2. **信号模式**：`emit-signals=true` 时 element 在 streaming 线程上 emit
    `new-sample` 信号，应用层在回调里 `pull_sample()`。
 
-本项目目前对两个 appsink 都关闭了信号（`emit-signals=false`），仅当
-"防 pipeline 卡死的流终结点"使用——facedetect 的检测结果走 pipeline bus，
-不需要消费 buffer；preview JPEG 留作未来 HTTP 端点接入时再启用。
+本项目当前未往 pipeline 中实际插入 `appsink`。face 副线仅需一个“防 pipeline 卡死”
+的流终点，因此选用 `fakesink`（async=false sync=false silent=true）；检测结果完全
+走 pipeline bus 上报投递，不需要应用层消费 buffer。前端画框则由 web 层在 `<video>`
+上叠加 canvas，基于 events FIFO 上报的坐标绘制，不需要从 pipeline 里拉 JPEG。
 
 ### Pad 端口能力
 
 | Pad | 能力 | 备注 |
 |-----|------|------|
-| **sink** | `ANY` | 由上游 caps 决定；本项目里分别是 `video/x-raw,format=RGB`（face_appsink）与 `image/jpeg`（face_jpeg_sink） |
+| **sink** | `ANY` | 由上游 caps 决定；常见举例：`video/x-raw,format=RGB` 或 `image/jpeg` |
 
 ### 关键属性
 
@@ -85,30 +85,16 @@ g_object_set(appsink, "emit-signals", TRUE, NULL);
 
 ### 项目内用法
 
-face 主检测路径——纯流终结点，**不消费 buffer**：
+本项目当前 **未在 pipeline 中使用 `appsink`**：face 副线终点使用了更轻量的 `fakesink`（名字为 `face_appsink` 仅为历史命名，不代表类型），因为检测结果介于 pipeline bus 上报，不需要应用层拉 buffer。
+
+若后续需要引入 appsink（例如：自定义 ROI 算法、HTTP JPEG 预览端点、应用层录制等），推荐模板：
 
 ```text
-... ! facedetect name=face0 display=false ...
-   ! appsink name=face_appsink emit-signals=false
-             max-buffers=2 drop=true sync=false
+... ! <前级处理> ! appsink name=<your_sink> emit-signals=true
+                                     max-buffers=1 drop=true sync=false
 ```
 
-face 画框预览——预留信号通道，本期未启用：
-
-```text
-... ! jpegenc quality=N
-   ! valve name=face_prev_valve drop=true
-   ! appsink name=face_jpeg_sink emit-signals=false
-             max-buffers=1 drop=true sync=false
-```
-
-为什么主检测路径仍要 appsink 而不是 fakesink？
-
-- `fakesink` 不暴露任何 GObject 信号，未来 face 副线如果要切到"buffer 路径
-  + 自定义 ROI 算法"，必须重新改 launch 串；
-- `appsink` 即便 `emit-signals=false`，也保留了未来"切到 emit-signals=true
-  + new-sample 回调"的零成本升级路径，符合"副线宪法第 6 条 — 副线生命周期内
-  不要重写 launch 字符串"。
+并在 C++ 侧连上 `new-sample` 信号、回调里即取即释（参考下方代码例）。
 
 ## 2. 内部工作原理与数据流程
 
@@ -159,8 +145,8 @@ flowchart LR
 ### 信号回调线程安全
 
 - `new-sample` 信号在 **streaming 线程**触发，**不在 GMainLoop 线程**。
-- 所以 face_jpeg_sink 未来接入 HTTP 时，必须在回调里抓锁后存入 `last_preview_jpeg_`，
-  HTTP handler 在 GMainLoop 线程里只能读这个缓存——禁止在信号回调里直接做磁盘 IO 或网络 IO。
+- 因此若后续为“应用层预览”接入 appsink，必须在回调里拓锁后存入缓存，外部 handler
+  只能读这个缓存——禁止在信号回调里直接做磁盘 IO / 网络 IO。
 
 ### 常见坑
 

@@ -47,9 +47,10 @@ function asLine(v, name, maxLen = 512) {
 
 /**
  * @param {import('fastify').FastifyInstance} app
- * @param {{ fifo: import('./fifo.mjs').FifoClient }} ctx
+ * @param {{ fifo: import('./fifo.mjs').FifoClient,
+ *          events?: import('./event_fifo.mjs').EventFifoReader }} ctx
  */
-export async function registerRoutes(app, { fifo }) {
+export async function registerRoutes(app, { fifo, events }) {
   /* ───────── 健康检查 ───────── */
   app.get('/api/health', async () => ({ ok: true, ts: Date.now() }));
 
@@ -150,8 +151,10 @@ export async function registerRoutes(app, { fifo }) {
   });
 
   /* ───────── WebSocket 事件流 ───────── */
-  // 1Hz 主动推 status；命令完成事件通过 fastify hooks 旁路推（这里简化为
-  // 仅 status 推送 + 客户端发命令时自己显示回执）。
+  // 1Hz 主动推 status；当 events 启用时同时旁路把 daemon 上报的事件直推给浏览器。
+  // 前端根据 msg.kind 分派试用：
+  //   'hello'   / 'status' / 'status_err' —— 控制台总体状态（既有）
+  //   'faces'   —— 人脸检测帧坐标（新增，前端在 <video> 上叠 canvas 绘制）
   app.get('/ws/events', { websocket: true }, (socket /* WebSocket */, req) => {
     const send = (obj) => {
       try { socket.send(JSON.stringify(obj)); } catch { /* ignore */ }
@@ -171,13 +174,24 @@ export async function registerRoutes(app, { fifo }) {
     const timer = setInterval(tick, 1000);
     tick();
 
-    socket.on('close', () => {
+    /* 人脸事件旁路：仅当 events 实例存在时才订阅。直接透传 daemon 写入的
+     * NDJSON 对象（{kind:'faces', ts_ns, frame_w, frame_h, count, rects}），
+     * 前端按 kind 区分处理。 */
+    let onFaceEvent = null;
+    if (events) {
+      onFaceEvent = (obj) => send(obj);
+      events.on('event', onFaceEvent);
+    }
+
+    const cleanup = () => {
       alive = false;
       clearInterval(timer);
-    });
-    socket.on('error', () => {
-      alive = false;
-      clearInterval(timer);
-    });
+      if (events && onFaceEvent) {
+        events.off('event', onFaceEvent);
+        onFaceEvent = null;
+      }
+    };
+    socket.on('close', cleanup);
+    socket.on('error', cleanup);
   });
 }

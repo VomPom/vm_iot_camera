@@ -65,8 +65,6 @@
 //     face on / face off           打开 / 关闭人脸检测（控 face_valve.drop）
 //     face status                  打印人脸检测运行态（count / cascade / min_size_px ...）
 //     face min-size <N>            热改 facedetect.min-size-width/height（自动 clamp 到 [24,1024]）
-//     face preview on / face preview off
-//                                  控 face_prev_valve.drop；preview 段未编译进 launch 时返 err
 //   非法命令记 warning，不会让进程崩溃。
 //
 // ─────────────────────────── 回执协议 ───────────────────────────
@@ -148,10 +146,8 @@ private:
      * effect 专属子命令 set-replace-image* 需 dynamic_cast<PagEffect*>。 */
     std::string handle_pag(const std::vector<std::string>& toks);
 
-    /* face 命令族（on / off / status / min-size / preview on|off）。
-     * face_branch_ 为 nullptr 时所有子命令统一返 face_disabled。
-     * preview 段未编译进 launch（cfg.face.preview_jpeg.enabled=false）时
-     * `face preview *` 返 face_preview_disabled，由 FaceBranch 内部判断。 */
+    /* face 命令族（on / off / status / min-size）。
+     * face_branch_ 为 nullptr 时所有子命令统一返 face_disabled。 */
     std::string handle_face(const std::vector<std::string>& toks);
 
     /* 工具：构造 "ok <line>\n<body>.\n" / "err <line> <reason>\n.\n"。 */

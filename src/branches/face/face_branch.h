@@ -5,15 +5,14 @@
 //   人脸检测副线（face branch）。挂在 raw 锚点 t. 下游：
 //
 //     t. ! queue ! valve(face_valve) ! videorate ! convert ! RGB
-//        ! facedetect(name=face0, display=false) ! appsink(face_appsink)
+//        ! facedetect(name=face0, display=false) ! fakesink(face_appsink)
 //
 //   facedetect 的检测结果不走 buffer payload，而是通过 pipeline bus 投
 //   element message `Element/facedetect`，结构体里的 `faces` 字段是
 //   `GValueArray of GstStructure`，每项含 `x/y/width/height` 四个 int。
 //
 //   FaceBranch 的职责：
-//     1) attach 时抓 `face_valve` / `face0` / `face_appsink` 三件套
-//        （preview 启用时再抓 `face_prev_valve` / `face_jpeg_sink`）；
+//     1) attach 时抓 `face_valve` / `face0` / `face_appsink` 三件套；
 //     2) 本 branch 不自己订阅 bus：RtspServer 使用
 //        gst_bus_enable_sync_message_emission + "sync-message" signal，
 //        在 streaming 线程同步广播给每个 branch 的 on_bus_message_sync，
@@ -23,9 +22,10 @@
 //          - 不叠加 sync handler slot，不影响 rtsp-server 内部 preroll。
 //     3) 解析 faces 数组（按面积降序保留前 N=8）；
 //     4) 应用 cooldown_ms 节流 + emit_when_empty 策略，更新 last_state_，
-//        并以 1 Hz rate-limit 打 LOGI；
-//     5) 提供 set_enabled / set_min_size / set_preview / format_status
-//        给 ControlChannel 调；上述 setter 全部加 mu_ 保护。
+//        并以 1 Hz rate-limit 打 LOGI；同时向 on_faces_cb_ 推一次 FaceEvent
+//        （用于 events FIFO 推送坐标给 web 端）；
+//     5) 提供 set_enabled / set_min_size / set_on_faces_callback / format_status
+//        给上层调；上述 setter 全部加 mu_ 保护。
 //     6) detach 时无需自己处理 bus（无订阅），直接让 BranchBase
 //        unref 元素，遵守 branch_base.h 的 detach 顺序契约。
 //
@@ -35,9 +35,9 @@
 //     - mu_ 同时保护元素引用与业务状态，setter 与 attach/unprepared 互斥。
 //
 //   作用域（明确不做的事）：
-//     - 不接管像素读取：appsink 只作"流终结点"防 pipeline 卡死；
-//     - 不直接画框：画框由 preview_jpeg 副线里 display=true 的第二个
-//       facedetect 实例做（与主检测路径解耦，避免画框延迟拖累主检测）；
+//     - 不接管像素读取：fakesink 只作“流终结点”防 pipeline 卡死；
+//     - 不直接画框：前端在视频上叠 canvas 基于 events FIFO 推送的坐标
+//       实时绘制，管道内不再做 JPEG 预览副线；
 //     - 不持久化事件：last_state_ 仅保最后一次；HTTP / SQLite 落盘留待后续。
 //
 
@@ -49,6 +49,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -82,20 +83,25 @@ public:
     /* 热改 facedetect.min-size-width/height；自动 clamp 到 [24, 1024]。 */
     bool set_min_size(int px, std::string* err);
 
-    /* 控 face_prev_valve.drop；preview 段未编译进 launch 时返 face_preview_disabled。 */
-    bool set_preview(bool on, std::string* err);
+    /* 人脸事件回调：每当一个新事件产生（经 cooldown / emit_when_empty 过滤后），
+     * FaceBranch 会向回调推一次 FaceEvent，同时携带当时检测帧的宽高（主线采集
+     * 分辨率，供下游归一化坐标用）。回调会在 mu_ 临界区外同步调用，回调体内
+     * 禁止反手回调 FaceBranch 公开接口以免产生重入。 */
+    using OnFacesCallback =
+        std::function<void(const FaceEvent& ev, int frame_w, int frame_h)>;
+    void set_on_faces_callback(OnFacesCallback cb);
+
+    /* 录入主线采集帧尺寸（cfg.capture.width/height）；回调推送时携带，供下游做归一化坐标。
+     * 不设置时默认 0/0，下游可额外判断。 */
+    void set_frame_size(int w, int h);
 
     /* status 命令用：多行 key=value 输出。 */
     void format_status(std::string& out) const override;
 
-    /* 当前是否有活跃的 face_prev_valve（即 preview 段已编译进 launch）。 */
-    bool preview_available() const;
-
 protected:
     const char* branch_name() const override { return "face"; }
 
-    /* 主检测三件套必抓；preview 元素仅在编译 + yaml 都打开时才会出现在 pipeline，
-     * 因此放到 attach 后用 element() 软探测，不写进 required_elements()。 */
+    /* 主检测三件套必抓。 */
     std::vector<const char*> required_elements() const override {
         return {"face_valve", "face0", "face_appsink"};
     }
@@ -124,11 +130,15 @@ private:
     std::chrono::steady_clock::time_point last_emit_ts_{};
     std::chrono::steady_clock::time_point last_log_ts_{};
 
-    /* preview 副线元素是"可选"的：仅当 preview_jpeg.enabled=true 时才会写进
-     * launch 字符串。因为可能不存在，所以不能放进 required_elements()
-     *（那会触发回滚），改由 face_branch 自己在 on_attached_locked 里软抛拓：
-     * gst_bin_get_by_name 拿到则持 ref，否则为 nullptr。detach 时对应 unref。 */
-    GstElement*                           preview_valve_ = nullptr;   // face_prev_valve，可为 null
+    /* 当前主检测副线的采集帧宽高（cfg.capture.width/height），由 configure() 写入；
+     * 此帧基台坐标系与 facedetect 上报的坐标系一致，用于回调中携带给下游
+     * 做归一化。主线与 face 副线共享同一采集帧尺寸（videoscale后）。 */
+    int                                   frame_w_ = 0;
+    int                                   frame_h_ = 0;
+
+    /* 人脸事件回调；可为空。主线写（configure/main.cpp）与 bus 线程读均在 mu_ 保护下；
+     * 调用时拷一份到栈上、释放 mu_ 后再执行，避免回调内反手拿锁造成死锁。 */
+    OnFacesCallback                       on_faces_cb_{};
 
     /* [HUNT-INSTR] bus 通路仪器：证明 sync handler 是否真的收到消息。
      * 仅调试用，稳定后应连同 on_bus_message 里的 [HUNT] 段一并移除。 */

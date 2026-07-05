@@ -144,8 +144,6 @@ std::string PipelineBuilder::make_input_caps(const v4l2_prober::Capability& cap,
  *     │ record     │ enc_t.   │ mp4mux+file  │ TODO    │ 原计划 no-leaky 大缓冲     │
  *     │ face       │ t.       │ facedetect+  │ 已实现  │ leaky=downstream(2)     │
  *     │            │          │ appsink      │        │ (cfg.face.enabled=true) │
- *     │ face_prev  │ t.       │ facedetect+  │ 可选    │ leaky=downstream(2)     │
- *     │            │          │ jpegenc+sink │        │ (preview_jpeg.enabled)  │
  *     │ motion     │ t.       │ msg/event    │ 规划中  │ leaky=downstream(2)     │
  *     └────────────┴──────────┴──────────────┴────────┴────────────────────────┘
  *
@@ -247,33 +245,6 @@ static void append_branch_face(std::ostringstream& os, const FaceConfig& cfg) {
      * "face_appsink"，与 FaceBranch::required_elements() 契约保持一致
      * （该名字只用作 gst_bin_get_by_name 查询，与 factory 类型解耦）。 */
     os << " ! fakesink name=face_appsink async=false sync=false silent=true";
-}
-
-/* face 画框预览副线（可选）：与主检测副线并列挂在 t. 上。
- * - 主动以 display=true 让 facedetect 在画面上黄框标记人脸。
- * - face_prev_valve 默认 drop=true，仅在 ControlChannel “face preview on” 后才出 JPEG。
- * - face_jpeg_sink emit-signals=false：本期只负责拼进 launch 串，未来接 HTTP
- *   端点时再在 FaceBranch 里改 emit-signals=true 并接 new-sample。 */
-static void append_branch_face_preview(std::ostringstream&          os,
-                                       const FacePreviewJpegConfig& p,
-                                       const FaceDetectConfig&      d) {
-    os << " t. ! queue max-size-buffers=2 leaky=downstream silent=true";
-    if (p.fps_limit > 0) {
-        os << " ! videorate"
-           << " ! video/x-raw,framerate=" << p.fps_limit << "/1";
-    }
-    os << " ! videoconvert ! video/x-raw,format=RGB"
-       << " ! facedetect display=true"
-       << " profile=\"" << d.cascade << "\""
-       << " min-size-width="  << d.min_size_px
-       << " min-size-height=" << d.min_size_px
-       << " scale-factor="    << d.scale_factor
-       << " min-neighbors="   << d.min_neighbors
-       << " ! videoconvert"
-       << " ! jpegenc quality=" << p.jpeg_quality
-       << " ! valve name=face_prev_valve drop=true"
-       << " ! appsink name=face_jpeg_sink emit-signals=false"
-       <<        " max-buffers=1 drop=true sync=false";
 }
 
 // ============================================================================
@@ -418,14 +389,11 @@ std::string PipelineBuilder::build(const Config& c) {
     append_branch_record(os);
 
     /* 5) face 人脸检测副线（可选）：从 raw tee=t 拉，主线 RTSP 零侵入。
-     *    检测结果走 pipeline bus 以 GST_MESSAGE_ELEMENT 投递，由 FaceBranch 解析。
-     *    preview_jpeg.enabled=true 时额外挂一条画框 JPEG 预览副线。 */
+     *    检测结果走 pipeline bus 以 GST_MESSAGE_ELEMENT 投递，由 FaceBranch 解析；
+     *    坐标事件通过 events FIFO 推给 web 前端做 canvas 叠加画框。 */
 #if VM_IOT_ENABLE_FACEDETECT
     if (c.face.enabled) {
         append_branch_face(os, c.face);
-        if (c.face.preview_jpeg.enabled) {
-            append_branch_face_preview(os, c.face.preview_jpeg, c.face.detect);
-        }
     }
 #endif
 

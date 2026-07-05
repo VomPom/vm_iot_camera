@@ -53,7 +53,8 @@ filter:
 
 control:
   request_fifo: /tmp/vm_iot.ctl       # 命令请求 FIFO；空串=不开启控制通道
-  reply_fifo: /tmp/vm_iot.reply     # 命令应答 FIFO；空串=不写回执
+  reply_fifo: /tmp/vm_iot.reply       # 命令应答 FIFO；空串=不写回执
+  event_fifo: /tmp/vm_iot.events      # 事件单向广播 FIFO（NDJSON）；空串=不推送事件
 
 snapshot:
   dir: /tmp/vm_iot/snapshots          # 默认输出目录；snapshot 命令未带 path 时使用
@@ -81,16 +82,12 @@ face:
     nose: ""                       # 鼻子级联，可留空
     mouth: ""                       # 嘴部级联，可留空
     eyes: ""                       # 眼部级联，可留空
-    min_size_px: 40                   # 检测最小边长（像素），允许 [24, 1024]
+    min_size_px: 80                   # 检测最小边长（像素），允许 [24, 1024]
     scale_factor: 1.1                 # Haar 多尺度搜索步长，允许 [1.05, 2.0]
     min_neighbors: 1                  # 投票阈值，越大越严，允许 [1, 10]
     detect_per_frame: false           # true=每帧都检；false=配合 rate.fps_limit 降采样
   rate:
     fps_limit: 5                      # 副线检测节流帧率；0 表示不限速
-  preview_jpeg:
-    enabled: true                   # 是否额外挂一路画框 JPEG 预览副线
-    jpeg_quality: 70                  # 1~100
-    fps_limit: 2                      # JPEG 预览的最大输出 fps
   control:
     enabled_at_start: true            # 启动期是否打开 face_valve（false=不检直到运行期 face on）
     emit_when_empty: true             # count=0 时是否也上报事件（诊断期打开，稳定后可改回 false）

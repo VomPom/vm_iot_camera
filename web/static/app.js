@@ -1,10 +1,12 @@
 // app.js — vm_iot console front-end
 // ---------------------------------------------------------------------------
 // 单文件、零依赖、纯 ESM。
-// 三大模块：
-//   1. media   — WebRTC (mediamtx WHEP) / HLS / RTSP-url 三档媒体源切换
-//   2. control — 命令分发：把按钮 / 输入框翻译成 fetch /api/...
-//   3. status  — WebSocket /ws/events 拉 1Hz status，刷状态面板 + 顶栏
+// 四大模块：
+//   1. media       — WebRTC (mediamtx WHEP) / HLS / RTSP-url 三档媒体源切换
+//   2. faceOverlay — 人脸绘框：基于 /ws/events 广播的 kind:'faces' 消息，
+//                    在 <video> 上叠一层 canvas 实时绘矩形。
+//   3. control     — 命令分发：把按钮 / 输入框翻译成 fetch /api/...
+//   4. status      — WebSocket /ws/events 拉 1Hz status，刷状态面板 + 顶栏
 // ---------------------------------------------------------------------------
 
 const $  = (sel) => document.querySelector(sel);
@@ -193,6 +195,128 @@ const media = {
   },
 };
 
+/* ─────────────────────────── face 绘框叠加 ─────────────────────────── *
+ * 数据链路：daemon (facedetect) → events FIFO (NDJSON) → web /ws/events
+ *   → statusMod.ws.onmessage → faceOverlay.onFacesEvent → rAF 循环重绘。
+ *
+ * 坐标系归一化：上报的 rects 在 daemon 主线采集帧尺寸（frame_w/h）下。
+ * <video> 元素重用了 CSS `object-fit: contain`，这意味着实际显示区可能
+ * 小于 canvas 尺寸（letterbox）。每帧重绘时仅根据视频固有尺寸与当前 canvas
+ * 尺寸计算 letterbox 偏移量，转换后再 cv::rectangle 样的 strokeRect。
+ *
+ * 限时性：仅保留最新一帧，且若距上一次上报超过 500ms 就清除（避免"人已走
+ * 但框还在"）；cooldown 与频率控制已在 daemon 侧完成，前端不再叠加频率限制。 */
+const faceOverlay = {
+  canvas:  null,
+  ctx:     null,
+  toggle:  null,
+  video:   null,
+  enabled: true,
+  latest:  null,        // { rects, frame_w, frame_h, arriveTs }
+  rafId:   0,
+
+  init() {
+    this.canvas = $('#faceOverlay');
+    this.video  = $('#player');
+    this.toggle = $('#faceOverlayToggle');
+    if (!this.canvas || !this.video) return;
+
+    this.ctx = this.canvas.getContext('2d');
+    this.enabled = this.toggle ? this.toggle.checked : true;
+
+    if (this.toggle) {
+      this.toggle.addEventListener('change', () => {
+        this.enabled = this.toggle.checked;
+        if (!this.enabled) this.clear();
+      });
+    }
+
+    /* HiDPI 适配：把 canvas 的位图尺寸换算为 devicePixelRatio，
+     * strokeRect 在 4K 屏上仍保持锐利的 1px 线重。 */
+    const resize = () => {
+      const dpr  = window.devicePixelRatio || 1;
+      const rect = this.canvas.getBoundingClientRect();
+      this.canvas.width  = Math.max(1, Math.round(rect.width  * dpr));
+      this.canvas.height = Math.max(1, Math.round(rect.height * dpr));
+      this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);   // 后续直接以 CSS 像素下笔
+    };
+    resize();
+    window.addEventListener('resize', resize);
+
+    const loop = () => {
+      this.rafId = requestAnimationFrame(loop);
+      this.render();
+    };
+    this.rafId = requestAnimationFrame(loop);
+  },
+
+  onFacesEvent(msg) {
+    if (!msg || msg.kind !== 'faces') return;
+    if (!Array.isArray(msg.rects)) return;
+    this.latest = {
+      rects:    msg.rects,
+      frame_w:  msg.frame_w  || 0,
+      frame_h:  msg.frame_h  || 0,
+      arriveTs: performance.now(),
+    };
+  },
+
+  clear() {
+    if (!this.ctx) return;
+    const rect = this.canvas.getBoundingClientRect();
+    this.ctx.clearRect(0, 0, rect.width, rect.height);
+  },
+
+  render() {
+    if (!this.ctx || !this.enabled) return;
+
+    const rectC = this.canvas.getBoundingClientRect();
+    this.ctx.clearRect(0, 0, rectC.width, rectC.height);
+
+    const l = this.latest;
+    if (!l || !l.rects.length) return;
+    /* 500ms 之后不再保留，避免人走后框遗留。daemon fps=5、cooldown=200ms，
+     * 500ms 足够接住相邻两帧之间的空隔。 */
+    if (performance.now() - l.arriveTs > 500) return;
+
+    /* 计算 <video> 内部真实显示区（object-fit: contain letterbox）。 */
+    const v = this.video;
+    const vw = v.videoWidth  || l.frame_w;
+    const vh = v.videoHeight || l.frame_h;
+    if (!vw || !vh || !l.frame_w || !l.frame_h) return;
+
+    const cw = rectC.width;
+    const ch = rectC.height;
+    const stageAspect = cw / ch;
+    const videoAspect = vw / vh;
+    let dispW, dispH, dispX, dispY;
+    if (videoAspect > stageAspect) {
+      dispW = cw; dispH = cw / videoAspect;
+      dispX = 0;  dispY = (ch - dispH) / 2;
+    } else {
+      dispH = ch; dispW = ch * videoAspect;
+      dispY = 0;  dispX = (cw - dispW) / 2;
+    }
+
+    const sx = dispW / l.frame_w;
+    const sy = dispH / l.frame_h;
+
+    this.ctx.save();
+    this.ctx.strokeStyle = '#7FE7B5';
+    this.ctx.lineWidth   = 2;
+    this.ctx.shadowColor = 'rgba(0,0,0,0.6)';
+    this.ctx.shadowBlur  = 2;
+    for (const r of l.rects) {
+      const x = dispX + r.x * sx;
+      const y = dispY + r.y * sy;
+      const w = r.w * sx;
+      const h = r.h * sy;
+      this.ctx.strokeRect(x, y, w, h);
+    }
+    this.ctx.restore();
+  },
+};
+
 /* ─────────────────────────── 命令分发 ─────────────────────────── */
 const ctrl = {
   filterMax: 6,
@@ -363,6 +487,8 @@ const statusMod = {
         this.markOnline();
       } else if (m.kind === 'status_err') {
         this.markOffline();
+      } else if (m.kind === 'faces') {
+        faceOverlay.onFacesEvent(m);
       }
     };
   },
@@ -425,6 +551,7 @@ const statusMod = {
 window.addEventListener('DOMContentLoaded', async () => {
   log.info('vm_iot console ready');
   ctrl.init();
+  faceOverlay.init();
   await media.init();
   statusMod.init();
 });

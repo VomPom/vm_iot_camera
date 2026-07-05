@@ -8,6 +8,7 @@
 #include "pag_sticker.h"
 #include "pag_effect.h"
 #include "control_channel.h"
+#include "event_fifo_writer.h"
 #include "face_branch.h"
 #include "face_prober.h"
 #include <memory>
@@ -204,8 +205,28 @@ int main(int argc, char** argv) {
     if (cfg.face.enabled) {
         face_branch = std::make_unique<FaceBranch>();
         face_branch->configure(cfg.face);
+        /* 录入主线采集帧尺寸：face 副线与主线共享同一采集帧（videoscale 后），
+         * facedetect 上报的坐标就在这个尺寸下，前端归一化时候需要。 */
+        face_branch->set_frame_size(cfg.capture.width, cfg.capture.height);
     }
 #endif
+
+    /* 事件广播 FIFO（单向 daemon → web）：
+     *   - 与控制通道完全解耦；未配置时静默禁用、不影响其他功能。
+     *   - 开启且 face_branch 存在时，把人脸事件推送接到 events 写端。
+     *   - main 作为 EventFifoWriter 的唯一拥有者，FaceBranch 只持回调引用；
+     *     退出时先 shutdown() face_branch 断掉回调流，再 stop() events，
+     *     避免 streaming 线程在 events 已释放后回头推。 */
+    EventFifoWriter events;
+    if (!cfg.control.event_fifo.empty()) {
+        events.start(cfg.control.event_fifo);
+    }
+    if (face_branch && events.active()) {
+        face_branch->set_on_faces_callback(
+            [&events](const FaceEvent& ev, int fw, int fh) {
+                events.push_faces(ev, fw, fh);
+            });
+    }
 
     std::vector<BranchBase*> branches{&snapshot};
     if (pag_branch) {
@@ -243,10 +264,11 @@ int main(int argc, char** argv) {
      *   2) 再停所有 branch。
      *   3) 最后停 RtspServer / filter：释放 server 与共享资源。 */
     ctrl.stop();
-    snapshot.shutdown();
     if (face_branch) {
         face_branch->shutdown();
     }
+    events.stop();
+    snapshot.shutdown();
     if (pag_branch) {
         pag_branch->shutdown();
     }

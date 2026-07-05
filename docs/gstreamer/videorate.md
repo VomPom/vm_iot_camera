@@ -57,14 +57,6 @@ queue (leaky=downstream) ! valve(face_valve)
    ! facedetect ...
 ```
 
-face preview 副线（30 fps → 2 fps，节流 JPEG 编码与传输成本）：
-
-```text
-queue ! videorate ! video/x-raw,framerate=2/1
-   ! videoconvert ! facedetect display=true
-   ! videoconvert ! jpegenc ...
-```
-
 代码位置：[`pipeline_builder.cpp::append_branch_face`](../../src/pipeline/pipeline_builder.cpp)。
 
 ## 2. 内部工作原理与数据流程

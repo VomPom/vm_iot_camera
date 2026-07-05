@@ -15,7 +15,7 @@
 
 可选属性 `display=true` 时会在画面上画黄框；`display=false` 时纯检测、零像素改动，
 适合"侧线检测、主线零侵入"的副线模式。本项目主检测路径默认 `display=false`，
-画框预览路径单独再起一个 facedetect 实例并 `display=true`。
+前端画框由 web 层在 `<video>` 上叠 canvas 基于 events FIFO 上报的坐标实时绘制。
 
 ### Pad 端口能力
 
@@ -82,18 +82,7 @@ t. ! queue (leaky=downstream, max-buffers=2, silent=true)
                 min-size-height=<min_size_px>
                 scale-factor=<scale_factor>
                 min-neighbors=<min_neighbors>
-   ! appsink name=face_appsink emit-signals=false
-             max-buffers=2 drop=true sync=false
-```
-
-可选画框预览副线（`face.preview_jpeg.enabled=true` 时再挂一条并列）：
-
-```text
-t. ! queue ... ! videorate ... ! videoconvert ! RGB
-   ! facedetect display=true profile="..." min-size-...
-   ! videoconvert ! jpegenc quality=<jpeg_quality>
-   ! valve name=face_prev_valve drop=true
-   ! appsink name=face_jpeg_sink ...
+   ! fakesink name=face_appsink async=false sync=false silent=true
 ```
 
 C++ 侧抓元素与读取消息：
@@ -178,7 +167,8 @@ watch / 应用层 source 函数）由调用方决定。本项目用 `gst_bus_add
 
 `cv::rectangle` 单矩形 < 0.1 ms，可忽略；
 但开启后会让上下游 buffer 不再"零修改"，依赖原帧的副线（比如未来 motion detect）
-将拿到带框图像。所以**主检测路径恒 `display=false`**，画框单独走 preview 副线。
+将拿到带框图像。因此**主检测路径恒 `display=false`**，前端画框完全在 web 层
+基于 events FIFO 推送的坐标用 canvas 叠加，管道内不再做 JPEG 预览副线。
 
 ### 为什么强制走 RGB 而非 BGR / GRAY8
 

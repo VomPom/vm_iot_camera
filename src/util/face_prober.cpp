@@ -79,8 +79,8 @@ bool is_ready(const FaceConfig& cfg, std::string* err) {
     if (!cascade_readable(cfg.detect.mouth,   "detect.mouth",   /*required*/false, err)) return false;
     if (!cascade_readable(cfg.detect.eyes,    "detect.eyes",    /*required*/false, err)) return false;
 
-    LOGI("face_prober: ready (cascade='{}' fps_limit={} preview_jpeg={})",
-         cfg.detect.cascade, cfg.rate.fps_limit, cfg.preview_jpeg.enabled);
+    LOGI("face_prober: ready (cascade='{}' fps_limit={})",
+         cfg.detect.cascade, cfg.rate.fps_limit);
     return true;
 }
 
