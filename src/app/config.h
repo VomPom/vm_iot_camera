@@ -113,7 +113,7 @@ struct FilterConfig {
  *
  * 事件 FIFO（event_fifo）与命令通道解耦，仅由 daemon 单向写入（行分隔的
  * NDJSON），web 前端侧吧作为只读孢听器，目前用于人脸坐标实时广播。
- * 空串=不开启。具体协议见 docs/control/event_fifo.md。 */
+ * 空串=不开启。具体协议见 docs/reference/event_fifo.md。 */
 struct ControlConfig {
     std::string request_fifo;  // 请求 FIFO 路径，空串=不开启控制通道
     std::string reply_fifo;    // 应答 FIFO 路径，空串=不写回执

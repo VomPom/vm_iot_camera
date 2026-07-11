@@ -199,12 +199,27 @@ struct ChosenInput {
 };
 
 ChosenInput choose_input(const Config& c) {
-    auto caps = v4l2_prober::probe(c.capture.device);
-    if (caps.empty()) {
-        LOGE("v4l2 probe returned empty for device={} (non-Linux or device unavailable)",
-             c.capture.device);
+    auto probe_result = v4l2_prober::probe_ex(c.capture.device);
+    if (!probe_result.ok()) {
+        /* 分级日志：设备物理不在（NoDevice）是"热拔插自愈"链路上的预期事件，
+         * 打 warn 即可；其它错误（Busy/Permission/OpenFailed）人为运维问题居多，
+         * 打 error 便于告警。无论哪种，都会退化到"硬拼兜底 caps"分支——
+         * v4l2src 立即失败会走 bus ERROR → RtspServer 自动 unprepare，
+         * 客户端下次重连时会重新走一遍 probe。 */
+        if (probe_result.device_absent()) {
+            LOGW("v4l2 probe: device '{}' absent (status={}), pipeline will "
+                 "use fallback caps and rely on auto-recovery when device returns",
+                 c.capture.device,
+                 v4l2_prober::to_string(probe_result.status));
+        } else {
+            LOGE("v4l2 probe failed for device={} status={} errno={}",
+                 c.capture.device,
+                 v4l2_prober::to_string(probe_result.status),
+                 probe_result.last_errno);
+        }
         return {};
     }
+    const auto& caps = probe_result.caps;
     LOGI("v4l2 capabilities for {}:\n{}",
          c.capture.device, v4l2_prober::format_table(caps));
 

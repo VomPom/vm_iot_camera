@@ -29,34 +29,34 @@
 
 namespace caps_ranker {
 
-/// 用户期望参数（从 yaml 配置映射而来）
+// 用户期望参数（从 yaml 配置映射而来）
 struct Preference {
     uint32_t width  = 1280;
     uint32_t height = 720;
     double   fps    = 30.0;
 
-    /// true：JPEG 最优（USB 摄像头主流路径，码流小、走 jpegdec/jpegparse）
-    /// false：原始 raw 最优（要做 zero-copy GPU 上传时用）
+    // true：JPEG 最优（USB 摄像头主流路径，码流小、走 jpegdec/jpegparse）
+    // false：原始 raw 最优（要做 zero-copy GPU 上传时用）
     bool prefer_jpeg = true;
 };
 
-/// 排序后的候选项
+// 排序后的候选项
 struct RankedCandidate {
-    /// 原始能力记录的 (fmt,w,h)，引用值拷贝，避免悬挂
+    // 原始能力记录的 (fmt,w,h)，引用值拷贝，避免悬挂
     v4l2_prober::Capability cap;
 
-    /// 该候选下从 cap.fps_list 中挑出的、最接近 preference.fps 的那个 fps
+    // 该候选下从 cap.fps_list 中挑出的、最接近 preference.fps 的那个 fps
     double chosen_fps = 0.0;
 
-    /// 评分（越小越优先），仅用于日志
+    // 评分（越小越优先），仅用于日志
     double score = 0.0;
 
-    /// 评分各项的明细，便于日志解释"为什么 A 比 B 排得靠前"
+    // 评分各项的明细，便于日志解释"为什么 A 比 B 排得靠前"
     double score_format     = 0.0;
     double score_resolution = 0.0;
     double score_fps        = 0.0;
 
-    /// 单行打印
+    // 单行打印
     std::string to_string() const;
 };
 
@@ -82,13 +82,13 @@ std::string format_ranking(const std::vector<RankedCandidate>& ranked);
 // 以下纯函数仅为单元测试暴露
 // ============================================================================
 
-/// 给定 media_type/raw_format 算出格式权重。规则在 .cpp 里集中维护。
+// 给定 media_type/raw_format 算出格式权重。规则在 .cpp 里集中维护。
 double format_weight(const std::string& media_type,
                      const std::string& raw_format,
                      bool prefer_jpeg);
 
-/// 在 fps_list 中挑出最接近 target 的一个；空列表返回 0.0。
-/// 多个等距时优先选较大者（高帧率惯例上更优）。
+// 在 fps_list 中挑出最接近 target 的一个；空列表返回 0.0。
+// 多个等距时优先选较大者（高帧率惯例上更优）。
 double pick_closest_fps(const std::vector<double>& fps_list, double target);
 
 } // namespace caps_ranker

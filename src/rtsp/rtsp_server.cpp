@@ -230,6 +230,21 @@ void RtspServer::on_media_configure(GstRTSPMediaFactory* /*factory*/,
                      G_CALLBACK(&RtspServer::on_media_prepared), self);
     g_signal_connect(media, "unprepared",
                      G_CALLBACK(&RtspServer::on_media_unprepared), self);
+
+    /* 5) 记录当前活跃 media（供 force_unprepare_current_media / sync-message 使用）。
+     *    - gst_object_ref 保证 media 至少活到我们 unref 那一刻；
+     *    - 用 mutex 保护并发访问（rtsp-server 工作线程写、跨线程 force_unprepare 读）。
+     *    - 若因某种极端情况上一次 unprepared 未清理，先释放旧 ref 再持新的。 */
+    {
+        std::lock_guard<std::mutex> g(self->media_mtx_);
+        if (self->current_media_) {
+            LOGW("media-configure: current_media_ not null before assign, releasing stale ref");
+            gst_object_unref(self->current_media_);
+            self->current_media_ = nullptr;
+        }
+        self->current_media_ = GST_RTSP_MEDIA(gst_object_ref(media));
+        self->unprepare_pending_.store(false, std::memory_order_release);
+    }
 }
 
 void RtspServer::on_media_prepared(GstRTSPMedia* /*media*/, gpointer /*user*/) {
@@ -255,6 +270,16 @@ void RtspServer::on_media_unprepared(GstRTSPMedia* /*media*/, gpointer user) {
             gst_object_unref(self->bus_);
             self->bus_ = nullptr;
         }
+        /* 释放 current_media_ 的 ref，供 force_unprepare_current_media 判 null 快速返回。
+         * unprepare_pending_ 同步清零：下一轮 media 生命周期从头计。 */
+        {
+            std::lock_guard<std::mutex> g(self->media_mtx_);
+            if (self->current_media_) {
+                gst_object_unref(self->current_media_);
+                self->current_media_ = nullptr;
+            }
+            self->unprepare_pending_.store(false, std::memory_order_release);
+        }
     }
     LOGI("media unprepared (released)");
 }
@@ -278,11 +303,118 @@ void RtspServer::s_on_sync_message(GstBus* bus, GstMessage* msg, gpointer user) 
     if (!self) return;
     /* 1) RtspServer 自己的日志处理（复用已有的 on_bus_message）。 */
     RtspServer::on_bus_message(bus, msg, self);
-    /* 2) 广播给 branches。branch 内部 override on_bus_message_sync 自行隔离消息。 */
+
+    /* 2) 热拔插自愈：v4l2src RESOURCE_ERROR 时投递异步 unprepare。
+     *    注意：本回调在 streaming 线程，绝不能直接 unprepare（会死锁），
+     *    force_unprepare_current_media 内部走 g_idle_add 到 main loop。
+     *    详见 docs/reference/hotplug_recovery.md。 */
+    if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_ERROR) {
+        GError* err = nullptr;
+        gst_message_parse_error(msg, &err, nullptr);
+        const bool is_resource_err =
+            err && err->domain == GST_RESOURCE_ERROR;
+        if (err) g_error_free(err);
+
+        if (is_resource_err) {
+            const gchar* src_name = GST_MESSAGE_SRC(msg)
+                ? GST_OBJECT_NAME(GST_MESSAGE_SRC(msg)) : nullptr;
+            const bool from_v4l2src =
+                src_name && g_str_has_prefix(src_name, "v4l2src");
+            if (from_v4l2src) {
+                LOGW("pipeline resource-error from v4l2src src={}, "
+                     "scheduling media unprepare (auto-recovery)",
+                     src_name ? src_name : "(null)");
+                self->force_unprepare_current_media("bus_error");
+            }
+        }
+    }
+
+    /* 3) 广播给 branches。branch 内部 override on_bus_message_sync 自行隔离消息。 */
     for (auto* b : self->branches_) {
         if (b) b->on_bus_message_sync(msg);
     }
 }
+
+// ============================================================================
+// 热拔插自愈：force_unprepare_current_media / g_idle_add trampoline
+// 详细方案见 docs/reference/hotplug_recovery.md（触发链路、时序、坑）。
+// ============================================================================
+
+namespace {
+struct UnprepareTask {
+    GstRTSPServer* server;      // 不持 ref（server 生命周期长于 media）
+    GstRTSPMedia*  media;       // 持 ref（构造时 gst_object_ref）
+    std::string    reason;
+};
+
+/* 关键点：必须"先踢 client 再 unprepare media"，否则拆 media 时
+ * stream-transport 里的 udpsrc 仍在 PLAYING 被 unref → GStreamer-CRITICAL
+ * "dispose in PLAYING (locked)"。filter 回调在 rtsp-server 锁内，禁止再
+ * 调 rtsp-server API。 */
+GstRTSPFilterResult s_client_filter_remove_all(GstRTSPServer* /*server*/,
+                                               GstRTSPClient* /*client*/,
+                                               gpointer       /*user*/) {
+    return GST_RTSP_FILTER_REMOVE;
+}
+} // namespace
+
+gboolean RtspServer::s_do_unprepare_on_main(gpointer user) {
+    auto* task = static_cast<UnprepareTask*>(user);
+    if (task && task->media) {
+        LOGW("force_unprepare_current_media: executing on main loop, reason={}",
+             task->reason);
+
+        // Step 1：踢掉所有 client（走正规 TEARDOWN → udpsrc 先转 NULL 再 unref）
+        if (task->server) {
+            GList* removed = gst_rtsp_server_client_filter(
+                task->server, &s_client_filter_remove_all, nullptr);
+            const int n = static_cast<int>(g_list_length(removed));
+            if (n > 0) {
+                LOGI("force_unprepare_current_media: closed {} client(s) before unprepare", n);
+            }
+            g_list_free_full(removed, g_object_unref);
+        }
+
+        // Step 2：unprepare media；返回 FALSE 一般代表已 unprepared，不算错误
+        gboolean ok = gst_rtsp_media_unprepare(task->media);
+        LOGI("gst_rtsp_media_unprepare returned {}", ok ? "TRUE" : "FALSE");
+        gst_object_unref(task->media);
+    }
+    delete task;
+    return G_SOURCE_REMOVE;
+}
+
+bool RtspServer::force_unprepare_current_media(const char* reason) {
+    // 幂等：一次拔除会瞬发多条 ERROR，只处理第一条；on_media_unprepared 清零
+    bool expected = false;
+    if (!unprepare_pending_.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel)) {
+        LOGI("force_unprepare_current_media: already pending, skip (reason={})",
+             reason ? reason : "?");
+        return true;
+    }
+
+    GstRTSPMedia* media = nullptr;
+    {
+        std::lock_guard<std::mutex> g(media_mtx_);
+        if (current_media_) {
+            media = GST_RTSP_MEDIA(gst_object_ref(current_media_));
+        }
+    }
+    if (!media) {
+        LOGI("force_unprepare_current_media: no active media (reason={})",
+             reason ? reason : "?");
+        unprepare_pending_.store(false, std::memory_order_release);
+        return false;
+    }
+
+    auto* task = new UnprepareTask{
+        server_, media, std::string(reason ? reason : ""),
+    };
+    g_idle_add(&RtspServer::s_do_unprepare_on_main, task);
+    return true;
+}
+
 
 bool RtspServer::start(const Config& cfg,
                        ShaderFilter* filter,

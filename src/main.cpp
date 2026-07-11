@@ -239,13 +239,6 @@ static std::vector<BranchBase*> collect_branches(Snapshot&    snapshot,
     return branches;
 }
 
-/*
- * 有序关闭,退出顺序很关键：
- *   1) 先停 ControlChannel：避免 FIFO 命令在 shutdown 期间访问已释放对象。
- *   2) 再停 face_branch：断掉 events 回调流，防止后续事件再进 EventFifoWriter。
- *   3) 停 EventFifoWriter：writer 线程 join、fd 关闭。
- *   4) 停剩余副线（snapshot / pag）。
- *   5) 最后停 RtspServer / filter：释放 server 与共享资源。 */
 static void shutdown_all(ControlChannel&  ctrl,
                          FaceBranch*      face_branch,
                          EventFifoWriter& events,

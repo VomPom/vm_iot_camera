@@ -20,7 +20,7 @@ find_package(spdlog REQUIRED)
 find_package(Threads REQUIRED)
 
 # 递归收集 src/ 下所有 .cpp，排除独立可执行体 cli/。
-# 选用 GLOB_RECURSE 是有意为之：源码按职责分多目录（pipeline/filter/branches/control/...），
+# 选用 GLOB_RECURSE 是有意为之：源码按职责分多目录（pipeline/filter/branches/reference/...），
 # 新增子目录无需再回来改 CMake。CMake 不会自动感知 glob 变化——
 # 需要新增/删除文件时请手动 cmake --build 时附带 reconfigure，或重跑 cmake。
 file(GLOB_RECURSE src-files CONFIGURE_DEPENDS

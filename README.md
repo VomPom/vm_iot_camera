@@ -8,7 +8,10 @@ with a software H.264 / H.265 backend, and serves the stream through
 `gst-rtsp-server`. A companion web console gives you visual control over
 the daemon, and a second binary `vm_iot_ctl` talks to the running daemon
 over a pair of FIFOs so you can switch effects, take snapshots, query
-status and more — all without restarting the stream.
+status and more — all without restarting the stream. UVC hot-plug is
+self-healing at runtime: the daemon keeps running, the browser tab does
+not need to be refreshed, and the picture comes back on its own within
+1–3s.
 
 It is meant for Linux IoT and edge boxes where you want one
 config-driven binary instead of a hand-maintained `gst-launch` shell
@@ -91,6 +94,10 @@ console interaction and face-detection overlay.
   include `filter`, `reload`, `status`, `snapshot`.
 - **Snapshot.** A `tee` + `valve` branch sits next to the encoder; the
   `snapshot` command opens the valve for one frame and writes a JPEG.
+- **UVC hot-plug recovery.** Unplug/replug the USB camera at runtime
+  without restarting the daemon or refreshing the browser; the picture
+  stalls for 1–3s and comes back on its own. See
+  [docs/reference/hotplug_recovery.md](docs/reference/hotplug_recovery.md).
 - **Face detection side branch.** A raw-anchor branch runs OpenCV Haar
   `facedetect` (from `gst-plugins-bad`, `opencv` submodule) at a
   throttled rate (default 5 fps). The main RTSP line is untouched

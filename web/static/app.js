@@ -63,16 +63,34 @@ function formatBody(body) {
   return keys.slice(0, 3).map(k => `${k}=${body[k]}`).join(' ');
 }
 
-/* ─────────────────────────── 媒体接入 ─────────────────────────── */
+/* ─────────────────────────── 媒体接入 ─────────────────────────── *
+ * 自动重连：所有触发源 → scheduleReconnect() 单一入口 → 指数退避（1s~10s）。
+ * 详见 docs/reference/hotplug_recovery.md。 */
+
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS  = 10000;
+const STALL_CHECK_MS    = 1000;
+const STALL_LIMIT_SEC   = 5;      // 连续多少秒 currentTime 未推进视为卡死
+
 const media = {
-  cfg: null,                   // /api/config 返回的 mediamtx 端口
+  cfg: null,
   mode: 'webrtc',
-  pc: null,                    // RTCPeerConnection
-  hls: null,                   // hls.js 实例（按需 import）
+  pc: null,
+  hls: null,
   el: $('#player'),
   overlay: $('#videoOverlay'),
   overlayMsg: $('#overlayMsg'),
   rtspBox: $('#rtspBox'),
+
+  // 重连状态
+  reconnectAttempt: 0,
+  reconnectTimer:   0,
+  reconnecting:     false,
+  connected:        false,
+  // 停滞看门狗
+  stallTimer:       0,
+  lastMediaTime:    -1,
+  stallSeconds:     0,
 
   async init() {
     try {
@@ -82,9 +100,18 @@ const media = {
       this.cfg = { whepPort: 8889, hlsPort: 8888, streamPath: 'live' };
     }
     $$('#modeSeg button').forEach(b => b.addEventListener('click', () => {
-      this.switchMode(b.dataset.mode);
+      this.switchMode(b.dataset.mode, /*userInitiated=*/true);
     }));
-    this.switchMode('webrtc');
+
+    /* 页面切回来立即抢一次重连，抵消 hidden 时 timer throttle 造成的延误。 */
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && !this.connected &&
+          (this.mode === 'webrtc' || this.mode === 'hls')) {
+        this.scheduleReconnect('visibility', /*immediate=*/true);
+      }
+    });
+
+    this.switchMode('webrtc', /*userInitiated=*/true);
   },
 
   setOverlay(msg) {
@@ -96,50 +123,141 @@ const media = {
     }
   },
 
-  async switchMode(mode) {
+  async switchMode(mode, userInitiated = false) {
+    if (userInitiated) {
+      this.cancelPendingReconnect();
+      this.reconnectAttempt = 0;
+    }
     this.teardown();
     this.mode = mode;
+    this.connected = false;
     $$('#modeSeg button').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
     this.rtspBox.classList.add('hidden');
     this.el.classList.remove('hidden');
 
-    const host = location.hostname;
-    if (mode === 'webrtc') {
-      this.setOverlay('negotiating webrtc…');
-      try {
-        await this.startWHEP(`http://${host}:${this.cfg.whepPort}/${this.cfg.streamPath}/whep`);
-      } catch (e) {
-        log.err(`webrtc failed: ${e.message}; try HLS`);
-        this.setOverlay('webrtc failed — try HLS');
-      }
-    } else if (mode === 'hls') {
-      this.setOverlay('loading hls…');
-      try {
-        await this.startHLS(`http://${host}:${this.cfg.hlsPort}/${this.cfg.streamPath}/index.m3u8`);
-      } catch (e) {
-        log.err(`hls failed: ${e.message}`);
-        this.setOverlay('hls failed');
-      }
+    if (mode === 'webrtc' || mode === 'hls') {
+      await this.connectCurrentMode();
     } else if (mode === 'rtsp') {
       this.el.classList.add('hidden');
       this.setOverlay('');
-      $('#rtspUrl').textContent = `rtsp://${host}:8554/live`;
+      $('#rtspUrl').textContent = `rtsp://${location.hostname}:8554/live`;
       this.rtspBox.classList.remove('hidden');
+      this.stopStallWatchdog();
     }
   },
 
+  async connectCurrentMode() {
+    if (this.reconnecting) return;
+    this.reconnecting = true;
+    const host = location.hostname;
+    const attempt = this.reconnectAttempt;
+    try {
+      if (this.mode === 'webrtc') {
+        this.setOverlay(attempt > 0
+          ? `reconnecting webrtc… (attempt ${attempt + 1})`
+          : 'negotiating webrtc…');
+        await this.startWHEP(`http://${host}:${this.cfg.whepPort}/${this.cfg.streamPath}/whep`);
+      } else if (this.mode === 'hls') {
+        this.setOverlay(attempt > 0
+          ? `reconnecting hls… (attempt ${attempt + 1})`
+          : 'loading hls…');
+        await this.startHLS(`http://${host}:${this.cfg.hlsPort}/${this.cfg.streamPath}/index.m3u8`);
+      }
+    } catch (e) {
+      log.err(`${this.mode} connect failed: ${e.message}`);
+      this.reconnecting = false;
+      this.scheduleReconnect(`${this.mode}-connect-error`);
+      return;
+    }
+    this.reconnecting = false;
+  },
+
+  /* 单一重连调度入口：任何触发源都走这里，防并发。 */
+  scheduleReconnect(reason, immediate = false) {
+    if (this.mode !== 'webrtc' && this.mode !== 'hls') return;
+    if (this.reconnectTimer || this.reconnecting) return;
+
+    this.connected = false;
+    this.teardown();
+
+    if (immediate) {
+      log.info(`reconnect: ${reason} (immediate)`);
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = 0;
+        this.connectCurrentMode();
+      }, 0);
+      return;
+    }
+
+    const backoff = Math.min(
+      RECONNECT_BASE_MS * Math.pow(2, this.reconnectAttempt),
+      RECONNECT_MAX_MS,
+    );
+    this.reconnectAttempt++;
+    log.err(`reconnect: ${reason}, retry in ${backoff}ms (attempt ${this.reconnectAttempt})`);
+    this.setOverlay(`disconnected — retry in ${(backoff / 1000).toFixed(1)}s`);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = 0;
+      this.connectCurrentMode();
+    }, backoff);
+  },
+
+  cancelPendingReconnect() {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = 0;
+    }
+  },
+
+  onConnected(kind) {
+    this.connected = true;
+    this.reconnectAttempt = 0;
+    this.setOverlay('');
+    if (kind) log.ok(`${kind} connected`);
+    this.startStallWatchdog();
+  },
+
   teardown() {
-    if (this.pc) { try { this.pc.close(); } catch {} this.pc = null; }
+    this.stopStallWatchdog();
+    if (this.pc)  { try { this.pc.close();  } catch {} this.pc  = null; }
     if (this.hls) { try { this.hls.destroy(); } catch {} this.hls = null; }
     this.el.srcObject = null;
     this.el.removeAttribute('src');
+    try { this.el.load(); } catch {}
+  },
+
+  /* 停滞看门狗：兜底"连接假活但流已停"——pc.connectionState 仍是 connected
+   * 但 currentTime 停在原地。连续 STALL_LIMIT_SEC 秒未推进即触发重连。 */
+  startStallWatchdog() {
+    this.stopStallWatchdog();
+    this.lastMediaTime = -1;
+    this.stallSeconds  = 0;
+    this.stallTimer = setInterval(() => this.checkStall(), STALL_CHECK_MS);
+  },
+  stopStallWatchdog() {
+    if (this.stallTimer) { clearInterval(this.stallTimer); this.stallTimer = 0; }
+    this.lastMediaTime = -1;
+    this.stallSeconds  = 0;
+  },
+  checkStall() {
+    if (!this.connected || this.el.paused) return;
+    const notReady = this.el.readyState < 2;   // < HAVE_CURRENT_DATA
+    const t = this.el.currentTime;
+    const stuck = notReady || (this.lastMediaTime >= 0 && t === this.lastMediaTime);
+    this.lastMediaTime = t;
+    if (stuck) {
+      if (++this.stallSeconds >= STALL_LIMIT_SEC) {
+        log.err(`stream stalled for ${this.stallSeconds}s (t=${t.toFixed(2)}, rs=${this.el.readyState})`);
+        this.scheduleReconnect('stall');
+      }
+    } else {
+      this.stallSeconds = 0;
+    }
   },
 
   // mediamtx WHEP：POST SDP offer，得到 answer
   async startWHEP(url) {
-    const pc = new RTCPeerConnection({
-      iceServers: [],  // 局域网内不需要 STUN
-    });
+    const pc = new RTCPeerConnection({ iceServers: [] });
     this.pc = pc;
     pc.addTransceiver('video', { direction: 'recvonly' });
     pc.addTransceiver('audio', { direction: 'recvonly' });
@@ -147,19 +265,37 @@ const media = {
     pc.ontrack = (ev) => {
       if (this.el.srcObject !== ev.streams[0]) {
         this.el.srcObject = ev.streams[0];
-        this.setOverlay('');
-        log.ok('webrtc track received');
+        this.onConnected('webrtc');
+      }
+      const trk = ev.track;
+      if (!trk) return;
+      /* track mute 常见于短暂丢包，1.5s 缓冲后仍 mute 才重连。 */
+      trk.addEventListener('mute', () => {
+        setTimeout(() => {
+          if (trk.muted && this.pc === pc) this.scheduleReconnect('track-mute');
+        }, 1500);
+      });
+      trk.addEventListener('ended', () => {
+        if (this.pc === pc) this.scheduleReconnect('track-ended');
+      });
+    };
+    /* pc 身份守卫（this.pc !== pc）：忽略被替换掉的旧 pc 的迟到事件，
+     * 否则旧 pc 的 closed 会把新连接又拆掉。 */
+    pc.onconnectionstatechange = () => {
+      if (this.pc !== pc) return;
+      const st = pc.connectionState;
+      if (st === 'failed' || st === 'disconnected' || st === 'closed') {
+        this.scheduleReconnect(`webrtc-${st}`);
       }
     };
-    pc.onconnectionstatechange = () => {
-      if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) {
-        this.setOverlay(`webrtc ${pc.connectionState}`);
-      }
+    pc.oniceconnectionstatechange = () => {
+      /* 某些 Chromium 版本只发 iceConnectionState，兜一层。 */
+      if (this.pc !== pc) return;
+      if (pc.iceConnectionState === 'failed') this.scheduleReconnect('webrtc-ice-failed');
     };
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-
     const resp = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/sdp' },
@@ -174,23 +310,30 @@ const media = {
     // Safari 原生支持
     if (this.el.canPlayType('application/vnd.apple.mpegurl')) {
       this.el.src = url;
-      this.el.addEventListener('loadeddata', () => this.setOverlay(''), { once: true });
-      this.el.addEventListener('error', () => this.setOverlay('hls error'), { once: true });
+      this.el.addEventListener('loadeddata', () => this.onConnected('hls'), { once: true });
+      this.el.addEventListener('error', () => this.scheduleReconnect('hls-video-error'), { once: true });
       return;
     }
     // 其他浏览器：动态拉 hls.js（CDN，仅这一处）
     const Hls = await import('https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.mjs')
       .then(m => m.default).catch(() => null);
-    if (!Hls || !Hls.isSupported()) {
-      throw new Error('hls.js unavailable');
-    }
+    if (!Hls || !Hls.isSupported()) throw new Error('hls.js unavailable');
     const hls = new Hls({ liveDurationInfinity: true, lowLatencyMode: true });
     this.hls = hls;
     hls.loadSource(url);
     hls.attachMedia(this.el);
-    hls.on(Hls.Events.MANIFEST_PARSED, () => this.setOverlay(''));
+    hls.on(Hls.Events.MANIFEST_PARSED, () => this.onConnected('hls'));
     hls.on(Hls.Events.ERROR, (_e, data) => {
-      if (data.fatal) this.setOverlay(`hls fatal: ${data.type}`);
+      if (!data.fatal) return;
+      /* fatal 先让 hls.js 自愈一次，不行才走完整重连。 */
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+        log.err(`hls fatal network: ${data.details}, recover`);
+        try { hls.startLoad(); return; } catch {}
+      } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+        log.err(`hls fatal media: ${data.details}, recover`);
+        try { hls.recoverMediaError(); return; } catch {}
+      }
+      this.scheduleReconnect(`hls-fatal-${data.type}`);
     });
   },
 };

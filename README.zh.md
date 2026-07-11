@@ -6,7 +6,8 @@
 GLSL 后处理 libpag 特效滤镜,用纯软件 H.264 / H.265 后端编码,最后通过
 `gst-rtsp-server` 把流暴露出去，Web 平台可视化控制，配套第二个二
 进制 `vm_iot_ctl` 通过一对 FIFO 与正在运行的守护进程通信,可以在不
-重启流的前提下切换特效、抓帧、查询状态等逻辑。
+重启流的前提下切换特效、抓帧、查询状态等逻辑。运行期支持 UVC 摄像头
+热拔插自愈,daemon 不重启、页面不刷新,画面 1–3s 内自动恢复。
 
 项目目前在 **Raspberry Pi 5(8 GB)** + **Ubuntu 24.04** 上开发与验
 证,USB UVC 摄像头从前置 USB 口接入。RTSP 守护进程、控制 FIFO、
@@ -87,6 +88,9 @@ Web 控制台全部跑在这一台设备上。
   `reload`、`status`、`snapshot`、`pag`、`face`、`raw` 等。
 - **抓帧。** 编码器旁边挂着一个 `tee` + `valve` 分支;`snapshot`
   命令会打开 valve 一帧的时间,把当帧写成 JPEG。
+- **UVC 热拔插自愈。** 运行期拔插 USB 摄像头 daemon 不重启、页面不刷新,
+  画面停顿 1–3s 后自动恢复;详见
+  [docs/reference/hotplug_recovery.md](docs/reference/hotplug_recovery.md)。
 - **人脸检测副线。** 从原始像素锥点接一条独立分支,跑 `gst-plugins-bad`
   的 OpenCV Haar `facedetect`,默认 5 fps 节流。主 RTSP 线路完全零侵入
   (`display=false`,不改一个像素);检测坐标通过 pipeline bus 上报,
@@ -414,7 +418,7 @@ FIFO。Web 控制台通过 `/ws/events` 订阅，在 `<video>` 上叠 canvas
 | `face.control.cooldown_ms` | 同一事件的聚合窗口，防 bus 风暴。 |
 
 events FIFO 的报文格式见
-[docs/control/event_fifo.md](docs/control/event_fifo.md)；element 本身的
+[docs/control/event_fifo.md](docs/control/event_fifo.md);element 本身的
 写真见 [docs/gstreamer/facedetect.md](docs/gstreamer/facedetect.md)。
 
 ### PAG 叠加控制

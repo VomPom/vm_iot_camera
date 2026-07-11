@@ -34,7 +34,7 @@ constexpr double kFmtI420     = 30.0;
 constexpr double kFmtRawOther = 50.0;
 constexpr double kFmtUnknown  = 100.0;
 
-/// 当 prefer_jpeg=false 时把 JPEG 罚到 raw 之后但仍优于 unknown。
+// 当 prefer_jpeg=false 时把 JPEG 罚到 raw 之后但仍优于 unknown。
 constexpr double kFmtJpegLow  = 60.0;
 
 // fps 评分系数：区分“高于目标”与“低于目标”两种情况。

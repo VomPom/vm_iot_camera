@@ -30,6 +30,22 @@
 namespace v4l2_prober {
 
 // ----------------------------------------------------------------------------
+// to_string(ProbeStatus)
+// ----------------------------------------------------------------------------
+const char* to_string(ProbeStatus s) {
+    switch (s) {
+        case ProbeStatus::Ok:            return "Ok";
+        case ProbeStatus::NoDevice:      return "NoDevice";
+        case ProbeStatus::Busy:          return "Busy";
+        case ProbeStatus::Permission:    return "Permission";
+        case ProbeStatus::OpenFailed:    return "OpenFailed";
+        case ProbeStatus::NoCapability:  return "NoCapability";
+        case ProbeStatus::NotSupported:  return "NotSupported";
+    }
+    return "?";
+}
+
+// ----------------------------------------------------------------------------
 // Capability::to_string
 // ----------------------------------------------------------------------------
 std::string Capability::to_string() const {
@@ -164,7 +180,7 @@ std::vector<double> intervals_to_fps(const struct v4l2_frmivalenum& base) {
 
 namespace {
 
-/// 安全 ioctl：自动重试 EINTR
+// 安全 ioctl：自动重试 EINTR
 int xioctl(int fd, unsigned long req, void* arg) {
     int r;
     do {
@@ -173,7 +189,7 @@ int xioctl(int fd, unsigned long req, void* arg) {
     return r;
 }
 
-/// 给定 (fd, fmt, w, h) 枚举所有支持的帧率
+// 给定 (fd, fmt, w, h) 枚举所有支持的帧率
 std::vector<double> enum_framerates(int fd, uint32_t fourcc, uint32_t w, uint32_t h) {
     std::vector<double> all_fps;
     for (uint32_t idx = 0; ; ++idx) {
@@ -198,17 +214,66 @@ std::vector<double> enum_framerates(int fd, uint32_t fourcc, uint32_t w, uint32_
     return all_fps;
 }
 
+// errno → ProbeStatus 分类。集中一处避免各调用点重复。
+//
+// 语义梳理（Linux 内核 v4l2 open 行为观察）：
+//   - ENODEV：字符设备存在但驱动已经 detach（拔除瞬间常见）
+//   - ENOENT：设备节点已被 udev 删除（拔除后期）
+//   - ENXIO ：底层硬件不响应（少见，也归为 NoDevice 处理）
+//   - EACCES：属主/权限组不匹配
+//   - EBUSY ：已被其它进程 O_RDWR 独占
+//   - 其他  ：网络/EIO/EMFILE 等，归为 OpenFailed
+ProbeStatus classify_open_errno(int e) {
+    switch (e) {
+        case ENODEV:
+        case ENOENT:
+        case ENXIO:      return ProbeStatus::NoDevice;
+        case EBUSY:      return ProbeStatus::Busy;
+        case EACCES:
+        case EPERM:      return ProbeStatus::Permission;
+        default:         return ProbeStatus::OpenFailed;
+    }
+}
+
+// 统一的 open：填充 last_errno + status，成功时返回 fd(>=0)，失败返回 -1。
+// 打日志的级别按分类分级：
+//   NoDevice → WARN（预期内的热拔插）
+//   Busy     → WARN（往往是并发运维触发）
+//   其它     → WARN 也用 warn，避免启动期一次瞬时错误刷 error 级噪音；
+//             真正的致命错误由上层结合业务上下文自行升级为 LOGE。
+int open_v4l2_classified(const std::string& device,
+                         ProbeStatus* out_status,
+                         int* out_errno) {
+    int fd = ::open(device.c_str(), O_RDWR | O_NONBLOCK);
+    if (fd >= 0) {
+        if (out_status) *out_status = ProbeStatus::Ok;
+        if (out_errno)  *out_errno  = 0;
+        return fd;
+    }
+    const int err = errno;
+    const auto st = classify_open_errno(err);
+    if (out_status) *out_status = st;
+    if (out_errno)  *out_errno  = err;
+    LOGW("v4l2_prober: open({}) failed: status={} errno={} ({})",
+         device, to_string(st), err, std::strerror(err));
+    return -1;
+}
+
 } // namespace
 
-std::vector<Capability> probe(const std::string& device) {
-    std::vector<Capability> caps;
+ProbeResult probe_ex(const std::string& device) {
+    ProbeResult out;
 
-    int fd = ::open(device.c_str(), O_RDWR | O_NONBLOCK);
+    ProbeStatus st = ProbeStatus::OpenFailed;
+    int         er = 0;
+    int fd = open_v4l2_classified(device, &st, &er);
     if (fd < 0) {
-        LOGW("v4l2_prober: open({}) failed: {}", device, std::strerror(errno));
-        return caps;
+        out.status     = st;
+        out.last_errno = er;
+        return out;
     }
 
+    std::vector<Capability> caps;
     // Layer 1: 枚举像素格式
     for (uint32_t fmt_idx = 0; ; ++fmt_idx) {
         struct v4l2_fmtdesc fmt{};
@@ -255,11 +320,29 @@ std::vector<Capability> probe(const std::string& device) {
     }
 
     ::close(fd);
-    return caps;
+
+    out.caps   = std::move(caps);
+    out.status = out.caps.empty() ? ProbeStatus::NoCapability : ProbeStatus::Ok;
+    return out;
+}
+
+std::vector<Capability> probe(const std::string& device) {
+    // 兼容外壳：内部走 probe_ex()，只回传 caps；错误信息已由 probe_ex 打印。
+    return probe_ex(device).caps;
 }
 
 bool device_accessible(const std::string& device) {
-    int fd = ::open(device.c_str(), O_RDWR | O_NONBLOCK);
+    return device_accessible(device, nullptr, nullptr);
+}
+
+bool device_accessible(const std::string& device,
+                       ProbeStatus*       out_status,
+                       int*               out_errno) {
+    ProbeStatus st = ProbeStatus::OpenFailed;
+    int         er = 0;
+    int fd = open_v4l2_classified(device, &st, &er);
+    if (out_status) *out_status = st;
+    if (out_errno)  *out_errno  = er;
     if (fd < 0) return false;
     ::close(fd);
     return true;
@@ -267,13 +350,30 @@ bool device_accessible(const std::string& device) {
 
 #else // 非 Linux 平台
 
-std::vector<Capability> probe(const std::string& device) {
-    LOGW("v4l2_prober: probe('{}') is only supported on Linux, returning empty", device);
+ProbeResult probe_ex(const std::string& device) {
+    LOGW("v4l2_prober: probe_ex('{}') is only supported on Linux, returning NotSupported",
+         device);
+    ProbeResult out;
+    out.status = ProbeStatus::NotSupported;
+    return out;
+}
+
+std::vector<Capability> probe(const std::string& /*device*/) {
     return {};
 }
 
 bool device_accessible(const std::string& /*device*/) {
     // 非 Linux 平台无 V4L2 设备可检测，返回 true 让调用方跳过检查而非误报。
+    return true;
+}
+
+bool device_accessible(const std::string& /*device*/,
+                       ProbeStatus*       out_status,
+                       int*               out_errno) {
+    // 非 Linux 平台：约定"跳过检测"= 视为可访问；但明确用 NotSupported 让上层
+    // 有需要的话可以据此走 mock/no-op 分支。
+    if (out_status) *out_status = ProbeStatus::NotSupported;
+    if (out_errno)  *out_errno  = 0;
     return true;
 }
 
